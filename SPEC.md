@@ -5,11 +5,11 @@
 A Shopify app with two layers:
 
 1. **Bot Block** — stops automated browsers, scraper extensions and suspicious networks while people browse the store.
-2. **Rules Engine** — merchant-built IF/THEN rules (AND / OR) that hide payment methods at checkout and act on orders after they're placed (review, cancel, tag, alert).
+2. **Rules Engine** — merchant-built IF/THEN rules (AND / OR) that hide payment methods at checkout and act on orders after they're placed (hold fulfillment, cancel, tag, email notification). Rules run in list order; the first match wins.
 
 Admin pages: **Dashboard**, **Rules**, **Orders**, **Bot Protection**.
 
-This document is the single source of truth for the build. It is split into 16 features. **Each feature is one branch and one PR**, built and tested before the next starts. Total estimate: **60 hours** (see `Store_Shield_Estimation.xlsx`).
+This document is the single source of truth for the build. It is split into 16 features. **Each feature is one branch and one PR**, built and tested before the next starts. Total estimate: **62.5 hours** (see `Store_Shield_Estimation.xlsx`).
 
 ---
 
@@ -54,10 +54,11 @@ This document is the single source of truth for the build. It is split into 16 f
 **In scope (v1)**
 - Bot checks on every storefront page: automation tools, scraper extensions, data-centre / VPN / Tor traffic, blocked networks (ASN) and countries, page-speed limit.
 - Each bot check set to **Off / Monitor / Block** by the merchant.
-- Rules with **ALL / ANY** conditions, in two stages:
-  - **Checkout** — hide COD or other payment methods.
-  - **After order** — put in review, auto-cancel (refund / restock / email customer), tag, email alert.
-- Rule status: **Live / Test / Off** (Test = log only; after-order rules only).
+- Two ordered rule lists: **Checkout rules** and **Post-order rules**. Rules run top to bottom and **the first rule that matches is applied**; the rest are skipped.
+- Each rule has a name, **AND / OR** conditions and one main action:
+  - **Checkout:** Allow or Hide payment methods (e.g. COD).
+  - **Post-order:** Allow, Hold fulfillment or Cancel (refund / restock / notify customer), plus optional Tag and Email notification.
+- Rules can be enabled or disabled and moved up or down. Post-order rules can also run in **test mode** (log only).
 - Orders page with review actions: Approve, Cancel, Mark as fraud.
 - Fraud list (scrambled email / phone / address) used by the "past fraud" condition.
 - Allowlist (IP, device, email, customer).
@@ -98,7 +99,7 @@ app/
     webhooks.*.tsx              # Webhooks (F08, F14)
   bot/                          # decide(), detectors' server side (F02, F04, F05)
   ip/                           # geo, ranges, hosting ASNs, good bots, speed (F05)
-  rules/                        # types, catalog, evaluate, resolve, templates (F07, F08, F11)
+  rules/                        # types, catalog, evaluate, rules.server, templates (F07, F08, F11)
   orders/                       # intake, context builder, actions (F08, F10, F12)
   services/                     # shopify graphql helpers, email, hashing, payment customization
   jobs/                         # cron jobs (F05, F14)
@@ -197,17 +198,17 @@ SPEC.md
 | F04 | Automation and extension checks | 3.5 | F03 | — |
 | F05 | IP intelligence | 5.0 | F02 | — |
 | F06 | Bot Protection page | 4.0 | F02–F05 | `AllowlistEntry` |
-| F07 | Rule engine core | 4.0 | F01 | `Rule` |
-| F08 | Rule conditions and order intake | 5.0 | F05, F07 | `OrderCheck`, `FraudEntry` |
+| F07 | Rule engine core | 3.5 | F01 | `Rule` |
+| F08 | Rule conditions and order intake | 6.5 | F05, F07 | `OrderCheck`, `FraudEntry` |
 | F09 | Checkout function | 5.5 | F07 | — |
 | F10 | Order actions | 5.0 | F08 | — |
-| F11 | Rules page and rule builder | 5.5 | F07–F10 | — |
+| F11 | Rules page and rule builder | 7.0 | F07–F10 | — |
 | F12 | Orders page | 4.5 | F10 | `StaffAction` |
 | F13 | Dashboard | 2.5 | F02, F08 | — |
 | F14 | Privacy and uninstall | 2.0 | all tables | — |
 | F15 | Pricing plan | 2.0 | F08 | — |
 | F16 | Go live | 2.0 | all | — |
-| | **Total** | **60.0** | | |
+| | **Total** | **62.5** | | |
 
 > F08 now also covers **order intake** (receiving the order and saving the check). That's where the "past fraud" and "repeat orders" conditions get their data. F10 then only does the actions.
 
@@ -547,94 +548,148 @@ The page saves with one Save bar and shows success / error toasts.
 
 ## F07 · Rule engine core
 
-**Hours:** 4.0 · **Branch:** `feat/f07-rule-engine` · **Depends on:** F01
+**Hours:** 3.5 · **Branch:** `feat/f07-rule-engine` · **Depends on:** F01
 
 ### Goal
-Rules can be saved and evaluated. The engine is pure, typed and fully unit-tested before any Shopify wiring.
+Rules can be saved, ordered and evaluated. The engine is pure, typed and fully unit-tested before any Shopify wiring.
+
+**How rules run**
+- There are two separate lists: **Checkout rules** and **Post-order rules**.
+- Each list runs **top to bottom**. The **first enabled rule whose conditions match is applied, and every rule below it is skipped**.
+- **Allow** is a real action. It does nothing to the order, but it stops lower rules from running. Merchants use it for exceptions, e.g. *"Email contains @mycompany.com → Allow"* placed at the top.
+- A post-order rule in **test mode** that matches is logged, and evaluation carries on to the next rule. A test rule never acts and never stops the list.
+- Disabled rules are skipped.
+- **Missing data never matches.** If a field has no value (no billing phone, no IP), every condition on it is false, including "does not contain" and "none of".
 
 ### Database
 
 ```prisma
-enum RuleStage  { CHECKOUT ORDER }
-enum MatchType  { ALL ANY }
-enum RuleStatus { LIVE TEST OFF }
+enum RuleStage { CHECKOUT ORDER }
+enum MatchType { ALL ANY }
 
 model Rule {
-  id              String     @id @default(cuid())
+  id              String    @id @default(cuid())
   shop            String
-  name            String
   stage           RuleStage
-  match           MatchType  @default(ALL)
-  conditions      Json       // Condition[]
-  actions         Json       // Action[]
-  status          RuleStatus @default(OFF)
-  priority        Int        @default(0)   // lower runs first; used for display and tie-breaks
-  timesTriggered  Int        @default(0)
+  position        Int                         // 1 = top of the list
+  name            String
+  match           MatchType @default(ALL)
+  conditions      Json                        // Condition[]
+  actions         Json                        // CheckoutActions | OrderActions
+  enabled         Boolean   @default(true)
+  testMode        Boolean   @default(false)   // ORDER rules only
+  timesTriggered  Int       @default(0)
   lastTriggeredAt DateTime?
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  @@index([shop, stage, status])
+  @@index([shop, stage, position])
 }
 ```
 
+Positions are always `1..n` with no gaps. Every move, create and delete rewrites positions inside one transaction.
+
 ### Backend
 
-**`app/rules/types.ts`** — Zod schemas (shared by server, builder UI and the function config):
+**`app/rules/types.ts`** — Zod schemas, shared by the server, the builder UI and the checkout function config:
 
 ```ts
-type Operator = "eq" | "neq" | "gt" | "gte" | "lt" | "lte"
-              | "contains" | "not_contains" | "starts_with"
-              | "in" | "not_in" | "is_true" | "is_false";
+type MatchOp =
+  | "contains" | "not_contains" | "exact" | "not_exact" | "starts_with"
+  | "any_of" | "none_of"
+  | "gt" | "lt" | "eq" | "between"
+  | "is_true" | "is_false"
+  | "in_range";                              // IP CIDR
 
-interface Condition { field: FieldKey; op: Operator; value?: string | number | string[]; param?: number } // param = hours for velocity
+interface Condition {
+  field: FieldKey;                           // Appendix A
+  op: MatchOp;
+  values: string[];                          // one or more; numbers as strings; between = [min, max]
+  window?: { amount: number; unit: "hours" | "days" };   // velocity + cross-customer
+}
 
-type Action =
-  | { type: "hide_payment"; methods: string[] }                       // CHECKOUT only
-  | { type: "review" }                                                 // ORDER only
-  | { type: "cancel"; refund: boolean; restock: boolean; notifyCustomer: boolean }
-  | { type: "tag"; target: "order" | "customer" | "both"; tags: string[] }
-  | { type: "alert" };
+type CheckoutActions = {
+  main: { type: "allow" } | { type: "hide_payment"; methods: string[] };
+};
+
+type OrderActions = {
+  main:
+    | { type: "allow" }
+    | { type: "hold" }
+    | { type: "cancel"; refund: boolean; restock: boolean; notifyCustomer: boolean };
+  tag?:   { target: "order" | "customer" | "both"; tags: string[] };
+  email?: boolean;                           // email notification to the merchant
+};
 ```
 
-**`app/rules/catalog.ts`** — every field: `key`, `label`, `valueType` (number, text, country, list, bool, enum), allowed `ops`, allowed `stages`. See [Appendix A](#appendix-a--condition-catalog).
+**Matching rules for values**
+- **Text:** case-insensitive and trimmed. Phones are compared on digits only. With several values, the condition is true if **any** value matches (e.g. Contains `mailinator, guerrillamail`).
+- **Negative text ops** (`not_contains`, `not_exact`) are true only if **no** value matches.
 
-**`app/rules/evaluate.ts`** — pure:
-- `evaluate(rule, ctx) → { matched: boolean, reasons: string[] }`
-- `ALL` = every condition true; `ANY` = at least one.
-- A field missing from the context is **false** (e.g. no email at checkout).
-- Text comparisons are case-insensitive and trimmed.
-- Reasons are plain English from the catalog, e.g. *"Cart value 450.00 is greater than 300"*, *"Email domain mailinator.com is disposable"*.
+**`app/rules/catalog.ts`** — one entry per field:
+- `key`, `label` (shown as "Filter Type"), `group`
+- `valueType`: text, zip, country, province, provinceCode, number, money, bool, choice, ip, window-count
+- allowed `ops`, `stages`, and `options` for choice fields
 
-**`app/rules/resolve.ts`** — combines the actions of all matched LIVE rules:
-- **Cancel beats review.** If any matched rule cancels, drop review. Cancel options are OR-ed (any rule asking for refund → refund).
-- **Tags:** the union of all tags.
-- **Alert:** sent once even if several rules ask for it.
-- `hide_payment`: union of methods (used by F09's config builder).
+See [Appendix A](#appendix-a--condition-catalog).
 
-**`app/rules/rules.server.ts`** — CRUD with validation:
-- Reject actions not allowed for the stage.
-- Reject fields not allowed for the stage.
-- Reject `TEST` status on `CHECKOUT` rules (the function can't report back).
-- `duplicate(id)`, `setStatus(id, status)`, `reorder(ids[])`.
+**`app/rules/evaluate.ts`** — pure functions:
+- `evaluateRule(rule, ctx) → { matched, reasons[] }`.
+  - ALL = every condition true; ANY = at least one.
+  - Reasons are plain English, e.g. *"Order Total 450.00 is greater than 300"*, *"Email domain mailinator.com is disposable"*.
+- `runList(rules, ctx) → { applied?: {rule, reasons}, testMatches: {rule, reasons}[] }`:
+  - walks rules by `position`, skips disabled ones
+  - logs test-mode matches and carries on
+  - stops at the first non-test match
+
+**`app/rules/rules.server.ts`** — data access:
+- `list(shop, stage, {search, page})` — 20 per page, by position.
+- `create` — adds the rule at the **bottom** (position = n + 1).
+- `update`, `remove` (closes the gap), `setEnabled`.
+- `moveUp` / `moveDown` — swap with the neighbour in a transaction.
+
+**Validation (Zod)**
+- Name 1–80 characters; at least one condition.
+- Field allowed for the stage; op allowed for the field.
+- Values valid for the type: number parses; `between` has min < max; CIDR is valid; country codes are ISO-2; a window is present for window fields.
+- Actions match the stage; `testMode` only on ORDER rules; `hide_payment` has at least one method.
 
 ### Frontend
-None in this PR (UI in F11). Add a temporary dev seed script `npm run seed:rules` that creates a few sample rules for testing F08–F10.
+None in this PR (UI in F11). Add a dev seed script `npm run seed:rules` that creates sample rules in both lists for testing F08–F10.
 
 ### Tests
-- **Unit (table-driven, `tests/fixtures/rules/*.json`):** every operator × value type; ALL vs ANY; missing field = false; reasons text; resolve conflicts (cancel + review → cancel; tag union; alert once); validation rejects a review action on a checkout rule, an order-only field on a checkout rule, and TEST on a checkout rule.
-- The same fixtures are reused by the function tests in F09, so both evaluators agree.
+Unit tests are table-driven, with fixtures in `tests/fixtures/rules/*.json`:
+- Every op × every value type, including multi-value text and `between` edges.
+- ALL vs ANY.
+- Missing field → false for every op.
+- `runList`:
+  - first match wins
+  - disabled skipped
+  - Allow stops the list
+  - test match logged and evaluation continues
+  - test match followed by a live match → both reported, only the live one applied
+  - empty list → nothing
+- Positions stay `1..n` after create, delete and moves.
+- Validation rejects:
+  - an order-only field on a checkout rule
+  - `hold` on a checkout rule
+  - `testMode` on a checkout rule
+  - `between` with min ≥ max
+  - a bad CIDR
+
+The same fixtures are reused by the checkout function tests in F09, so both evaluators agree.
 
 ### Done when
-- [ ] Engine and resolver are 100% covered by unit tests
+- [ ] `evaluateRule` and `runList` fully covered by unit tests
 - [ ] Invalid rules can't be saved
-- [ ] Seed script creates working sample rules
+- [ ] Reordering never leaves gaps or duplicates
+- [ ] Seed script creates working sample rules in both lists
 
 ---
 
 ## F08 · Rule conditions and order intake
 
-**Hours:** 5.0 · **Branch:** `feat/f08-conditions-intake` · **Depends on:** F05, F07
+**Hours:** 6.5 · **Branch:** `feat/f08-conditions-intake` · **Depends on:** F05, F07
 
 ### Goal
 Every new order is received, turned into a context with all condition fields, evaluated against ORDER rules and saved with the matched rules and reasons. **No actions yet** — this PR behaves as if every rule were in Test mode.
@@ -655,7 +710,11 @@ model OrderCheck {
   total        Decimal     @db.Decimal(12, 2)
   currency     String
   gateway      String?                     // e.g. "Cash on Delivery (COD)"
-  matchedRules Json        // [{ruleId, name, status, reasons[]}]
+  customerKey  String?                     // customer GID, else email hash (for cross-customer counts)
+  nameHash     String?
+  shipAddrHash String?
+  appliedRule  Json?                       // {ruleId, name, reasons[]} — the first live rule that matched
+  testMatches  Json        @default("[]")  // test-mode rules that matched: [{ruleId, name, reasons[]}]
   actionsTaken Json        @default("[]")  // F10: [{type, ok, error?, at}]
   status       CheckStatus @default(PASSED)
   createdAt    DateTime    @default(now())
@@ -665,6 +724,8 @@ model OrderCheck {
   @@index([shop, ip, createdAt])
   @@index([shop, emailHash, createdAt])
   @@index([shop, phoneHash, createdAt])
+  @@index([shop, nameHash, createdAt])
+  @@index([shop, shipAddrHash, createdAt])
 }
 
 enum FraudType { EMAIL PHONE ADDRESS }
@@ -699,6 +760,9 @@ model FraudEntry {
 - line items (quantity, product ID)
 - customer (ID, number of orders, tags)
 - Shopify risk assessments (highest risk level)
+- full billing and shipping addresses including names, company and phone
+- Shopify Protect status (where the store has it)
+- disputes (chargebacks) on the customer's previous orders — needs the disputes read scope; empty for stores without Shopify Payments
 
 Check the field names against the pinned API version.
 
@@ -709,13 +773,16 @@ Check the field names against the pinned API version.
 - `hash(shop, value) = HMAC-SHA256(HASH_SECRET, shop + ":" + value)`.
 
 **`app/orders/context.ts`** — `buildOrderContext(order, shop) → OrderContext` with every ORDER field in [Appendix A](#appendix-a--condition-catalog):
+- Billing and shipping fields: copied straight from the order (all 12 of each in Appendix A).
 - Disposable email: bundled JSON list from the open-source `disposable-email-domains` project, loaded once.
+- Chargebacks: count of disputes on the customer's earlier orders.
+- Cross-customer: count of **different** `customerKey`s with the same `nameHash` / `phoneHash` / `shipAddrHash` inside the condition's window.
 - IP fields: reuse F05 `geo` / `ranges` / `hosting-asns` on the order's client IP.
 - Velocity: count `OrderCheck` rows in the same shop with the same IP / email hash / phone hash within `param` hours (excluding this order).
 - Past fraud: look up `FraudEntry` for the email, phone, shipping address and billing address hashes. Also exposes **which** one matched for the reason text.
 - Allowlist: if email or customer is allowlisted, skip evaluation entirely (status `PASSED`, reason "Allowlisted").
 
-**`app/orders/intake.ts`** — fetch → context → evaluate all LIVE and TEST ORDER rules → save `OrderCheck` with `matchedRules` (each entry includes the rule's status) → increment `timesTriggered` / `lastTriggeredAt` on matched LIVE rules. Any error → `OrderCheck.status = ERROR` with the message; the order is left alone.
+**`app/orders/intake.ts`** — fetch → context → `runList(post-order rules)` (F07) → save `OrderCheck` with `appliedRule` and `testMatches` → increment `timesTriggered` / `lastTriggeredAt` on the applied rule and on test matches. Any error → `OrderCheck.status = ERROR` with the message; the order is left alone.
 
 ### Frontend
 None (Orders page in F12). Temporary: the app home lists the last 10 `OrderCheck` rows with matched rule names.
@@ -742,7 +809,7 @@ None (Orders page in F12). Temporary: the app home lists the last 10 `OrderCheck
 **Hours:** 5.5 · **Branch:** `feat/f09-checkout-function` · **Depends on:** F07
 
 ### Goal
-LIVE CHECKOUT rules hide COD or other payment methods during checkout.
+Enabled checkout rules hide COD or other payment methods during checkout. The first matching rule in the Checkout list decides.
 
 > **Confirm first:** which Shopify plans let an App Store app's payment customization run, and that hiding works with the store's checkout. Write the answer in the PR.
 
@@ -776,21 +843,24 @@ query RunInput($collectionIds: [ID!], $customerTags: [String!]) {
 
 - **Run logic:**
   - If the customer has the `cs-trusted` tag, hide nothing.
-  - Otherwise evaluate each config rule with a **small evaluator inside the function** that supports only CHECKOUT fields.
-  - For each matched rule, hide every payment method whose name contains one of its `methods` (case-insensitive).
+  - Otherwise walk the config rules **in list order** with a **small evaluator inside the function** that supports only checkout fields.
+  - The **first** matching rule decides:
+    - `allow` → hide nothing
+    - `hide` → hide every payment method whose name contains one of its `methods` (case-insensitive)
+  - Later rules are ignored.
   - Never hide **all** methods: if everything would be hidden, hide nothing and stop. A store with no way to pay is worse than a missed rule.
 - **Config shape** (kept small; max 25 checkout rules):
 
   ```json
   { "v": 1, "trustedTag": "cs-trusted",
     "rules": [{ "id": "r1", "match": "ALL",
-                "conditions": [{ "field": "cart.total", "op": "gt", "value": 300 }],
-                "hide": ["cash on delivery"] }] }
+                "conditions": [{ "field": "order.total", "op": "gt", "values": ["300"] }],
+                "action": "hide", "methods": ["cash on delivery"] }] }
   ```
 
 **Server** `app/services/payment-customization.server.ts`:
 - `ensureCustomization(shop)` — find our payment customization or create it (`paymentCustomizationCreate` with the function ID, enabled).
-- `syncCheckoutRules(shop)` — build the config from LIVE CHECKOUT rules (sorted by priority) and write it with `metafieldsSet`. Called after every rule create / update / delete / status change.
+- `syncCheckoutRules(shop)` — build the config from **enabled** CHECKOUT rules **in list order** and write it with `metafieldsSet`. Called after every rule create / update / delete / enable / disable / move.
 - `getStatus(shop)` — whether the customization exists and is enabled.
 
 ### Frontend
@@ -803,16 +873,17 @@ query RunInput($collectionIds: [ID!], $customerTags: [String!]) {
   - trusted customer → nothing hidden
   - visitor flag `datacenter` → COD hidden
   - a rule that would hide all methods → nothing hidden
+  - an Allow rule above a hide rule, both matching → nothing hidden (first match wins)
 
   Reuse the F07 fixture conditions so both evaluators agree.
-- **Unit:** `syncCheckoutRules` builds the expected config; TEST / OFF rules are excluded.
-- **Manual (dev store):** seed "cart total > 300 → hide COD".
+- **Unit:** `syncCheckoutRules` builds the expected config in list order; disabled rules are excluded.
+- **Manual (dev store):** seed "Order Total greater than 300 → Hide payment methods: Cash on Delivery".
   - Cart of 250 → COD visible.
   - Cart of 350 → COD gone, card still there.
-  - Turn the rule Off → COD back within a minute.
+  - Disable the rule → COD back within a minute.
 
 ### Done when
-- [ ] COD disappears only when a LIVE rule matches
+- [ ] COD disappears only when the first matching enabled rule hides it
 - [ ] Trusted customers never lose payment methods
 - [ ] Config re-syncs on every rule change
 
@@ -823,21 +894,22 @@ query RunInput($collectionIds: [ID!], $customerTags: [String!]) {
 **Hours:** 5.0 · **Branch:** `feat/f10-order-actions` · **Depends on:** F08
 
 ### Goal
-Matched LIVE ORDER rules now act: review, cancel, tag, alert.
+The first matching post-order rule now acts: hold fulfillment, cancel or allow, plus tag and email notification.
 
 ### Database
 None (uses `OrderCheck.actionsTaken` and `status`).
 
 ### Backend
 
-**`app/orders/actions.ts`** — after intake, `resolve()` the actions of matched **LIVE** rules (TEST rules stay logged only), then run them in this order:
+**`app/orders/actions.ts`** — after intake, take the **applied rule** (the first enabled, non-test rule that matched). Test matches never act. Run its main action first, then Tag, then Email notification:
 
 | Action | Shopify call | Result |
 |---|---|---|
-| **Tag** | `tagsAdd` on the order and/or customer (customer only if the order has one) | status `TAGGED` if nothing stronger happened |
-| **Cancel** | `orderCancel` with `reason: FRAUD`, `refund`, `restock`, `notifyCustomer` from the resolved options | status `CANCELLED`; tag order `cs-cancelled` |
-| **Review** (only if not cancelled) | `fulfillmentOrderHold` on each open fulfillment order (`reason: OTHER`, notes: rule names) | status `REVIEW`; tag order `cs-review` |
-| **Alert** | Email to `Settings.alertEmail` (fallback: shop owner email): order name, total, matched rules, reasons, link to the order in our app | — |
+| **Hold fulfillment** (main) | `fulfillmentOrderHold` on each open fulfillment order (`reason: OTHER`, notes: rule name) | status `REVIEW`; tag order `cs-review` |
+| **Cancel** (main) | `orderCancel` with `reason: FRAUD` and the rule's `refund`, `restock`, `notifyCustomer` | status `CANCELLED`; tag order `cs-cancelled` |
+| **Allow** (main) | nothing | status `PASSED`; rule name recorded |
+| **Tag** (information) | `tagsAdd` on the order and/or customer (customer only if the order has one) | status `TAGGED` if the main action was Allow |
+| **Email notification** (information) | Email to `Settings.alertEmail` (fallback: shop owner email): order name, total, rule name, reasons, link to the order in our app | — |
 
 - Each action records `{type, ok, error?, at}` in `actionsTaken`. One failing action doesn't stop the others.
 - Retries: Shopify throttling errors retry up to 3 times with backoff. Other errors are recorded and shown on the Orders page.
@@ -848,10 +920,10 @@ None (Orders page in F12). The temporary home list now shows status and actions.
 
 ### Tests
 - **Unit:** run actions with a mocked GraphQL client:
-  - cancel + review → only cancel called
-  - tags merged
+  - only the applied rule acts, never a rule below it
+  - Allow with no Tag / Email makes no Shopify calls
   - one failing call recorded while the others still run
-  - TEST rules trigger nothing
+  - test-mode matches trigger nothing
 - **Manual (dev store with seed rules), one test order per action:**
   - Review → the order shows "On hold" in Shopify and can't be fulfilled.
   - Cancel with refund + restock + email → order cancelled, refunded, stock back, email visible in Mailpit (with notify on, Shopify sends its own cancellation email).
@@ -860,74 +932,160 @@ None (Orders page in F12). The temporary home list now shows status and actions.
 
 ### Done when
 - [ ] Each of the four actions works on the dev store
-- [ ] Conflicts resolved as specified
+- [ ] Only the first matching rule acts
 - [ ] Failures visible in `actionsTaken`, never crash intake
 
 ---
 
 ## F11 · Rules page and rule builder
 
-**Hours:** 5.5 · **Branch:** `feat/f11-rules-ui` · **Depends on:** F07–F10
+**Hours:** 7.0 · **Branch:** `feat/f11-rules-ui` · **Depends on:** F07–F10
 
 ### Goal
-Merchants create and manage rules without touching JSON.
+Merchants manage two ordered rule lists and build rules with a form, never JSON. The layout follows the agreed reference screens: a rules table with reorder arrows, and an Add Rule page with three cards (Rule Settings, Conditions, Actions).
 
 ### Database
-None.
+None (uses `Rule` from F07).
 
 ### Backend
-- Loaders and actions call `rules.server.ts` (F07). Every save of a CHECKOUT rule calls `syncCheckoutRules` (F09).
-- `app/rules/templates.ts` — starter rules, always created with status **OFF** so nothing goes live by surprise:
-
-| Template | Stage | Conditions | Actions |
-|---|---|---|---|
-| Hide COD for big orders | Checkout | cart total > 300 | hide COD |
-| Hide COD for risky visitors | Checkout | visitor flags contain datacenter or tor | hide COD |
-| Hide COD for fraud customers | Checkout | customer tag is `cs-fraud` | hide COD |
-| Review disposable emails | Order | email is disposable | review, tag `disposable-email` |
-| Review country mismatch | Order | billing country ≠ shipping country | review |
-| Cancel known fraud | Order | past fraud match | cancel (refund, restock), tag `cs-fraud`, alert |
-| Review high Shopify risk | Order | Shopify risk is high | review, alert |
-| Review repeat orders | Order | 3+ orders from same IP in 1 hour | review |
+- Loaders and actions call `rules.server.ts` (F07): list, create, update, delete, enable/disable, move up/down.
+- Every change to a **checkout** rule calls `syncCheckoutRules` (F09).
+- **Payment method names for the "Hide payment methods" picker:** suggest the names seen on past orders (`OrderCheck.gateway`) plus "Cash on Delivery". Also allow free text, because there may be no simple API for an app to list a store's checkout payment methods (confirm in this PR).
+- **Country and province lists:** a static ISO country list plus Shopify's country/province data for province pickers.
 
 ### Frontend
 
-**`app.rules._index.tsx` — Rules list**
-- Table: name, stage badge (Checkout / After order), status (Live / Test / Off), conditions summary ("ALL of 2 conditions"), times triggered, last triggered.
-- Row actions: change status, edit, duplicate, delete (with confirm).
-- "Create rule" button and an "Add from template" menu.
-- Empty state explaining rules, with the templates shown.
+#### Rules list — `app.rules._index.tsx`
 
-**`app.rules.$id.tsx` — Rule builder** (`new` for a new rule)
-1. **Name**
-2. **When:** Checkout (before payment) / After order is placed
-3. **Match:** ALL / ANY of these conditions
-4. **Conditions:** rows of field → operator → value
-   - Field dropdown shows only fields allowed for the chosen stage, grouped as in Appendix A.
-   - Operator dropdown depends on the field type.
-   - Value input depends on type: number, text, country picker, tag input, product / collection picker (App Bridge resource picker), yes / no, risk level select, and "hours" for velocity.
-5. **Actions:** only the actions allowed for the stage.
-   - Hide payment methods: checkboxes from a text list, default "Cash on Delivery"
-   - Cancel: Refund / Restock / Email customer checkboxes
-   - Tag: target + tags
-   - Review
-   - Alert
-6. **Status:** Live / Test / Off. Test is disabled for checkout rules, with a tooltip explaining why.
-7. **Preview sentence**, e.g. *"After an order is placed, if ALL of: cart value is greater than 300 AND shipping country is not BD → put in review and tag `high-value`."*
+```
+Rules                                                              [ Add rule ]
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Rules match in the order they are listed below. The first rule that matches │
+│ will be applied.                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ [Post-order rules ⌄]  [ 🔍 Search rules by name...                        ] │
+│ Rule              Match  Condition(s)            Action(s)          Created  Actions │
+│ Disposable Email  all    [Check if Disp. Email]  [Cancel]           Oct 15   ▶ ✎ 🗑 ↓ │
+│ Address mismatch  all    [Billing - Country]     [Hold fulfillment] Oct 15   ▶ ✎ 🗑 ↑ ↓ │
+│ Shopify High Risk all    [Shopify Risk Level]    [Tag][Email][Hold] Oct 15   ▷ ✎ 🗑 ↑ ↓ │
+│ ...                                                                          │
+│                         |◀   ◀   Page 1 of 1   ▶   ▶|                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-Validation errors from Zod are shown next to the field. Save bar + toast.
+- **Banner:** "Rules match in the order they are listed below. The first rule that matches will be applied."
+- **List selector:** Post-order rules / Checkout rules. Kept in the URL (`?stage=order|checkout`) so a refresh and the back button keep it.
+- **Search** by name: server-side, debounced, partial match.
+- **Columns:**
+
+| Column | Content |
+|---|---|
+| Rule | Name, cut to 2 lines with "…"; full name in a tooltip. A **Test** badge if in test mode. |
+| Match Type | Badge `all` or `any`. |
+| Condition(s) | One chip per condition showing the Filter Type label. Tooltip shows the full condition, e.g. "Order Total greater than 300". |
+| Action(s) | Chips: the main action (Allow / Hold fulfillment / Cancel / Hide payment methods), plus Tag and Email notification if set. |
+| Created | Date in the store's locale. |
+| Actions | Icon buttons: **▶ Enable / disable** (solid = enabled, greyed = disabled; tooltip says which) · **✎ Edit** · **🗑 Delete** (red; confirmation modal "Delete rule '<name>'? This can't be undone.") · **↑ Move up** (hidden on the first rule) · **↓ Move down** (hidden on the last rule). Moving works across page boundaries. |
+
+- **Pagination:** 20 rules per page with first / previous / "Page X of Y" / next / last.
+- **Empty state** for each list: a short explanation and an "Add rule" button.
+- **Toasts:** "Rule enabled", "Rule disabled", "Rule moved", "Rule deleted".
+
+#### Add / edit rule — `app.rules.new.tsx` and `app.rules.$id.tsx`
+
+- **Breadcrumb:** Rules / Add New Rule (or Rules / Edit Rule).
+- **List:** taken from `?stage=` and shown as a badge ("Post-order rule" / "Checkout rule"). It can't be changed after creation.
+
+**Card 1 — Rule Settings**
+- **Rule Name** (required, max 80).
+- **How should conditions combine?** (radio)
+  - **Match only when all conditions are true (AND)** — "Safer default. Every condition must match before this rule runs." *(default)*
+  - **Match when at least 1 condition is true (OR)** — "Use with care. One broad condition can trigger this rule even if every other condition fails."
+- Post-order rules only: **☐ Test mode** — "Log matches on the Orders page without taking any action."
+
+**Card 2 — Conditions** (one or more rows)
+
+Each row has three inputs:
+- **Filter Type:** a grouped select with the groups and labels from [Appendix A](#appendix-a--condition-catalog). It shows only fields available for this list.
+- **Match Type** and **Value:** depend on the field type:
+
+| Field type | Match Type options | Value input |
+|---|---|---|
+| Text (names, company, address lines, city, email, phone) | Contains · Exact match · Does not contain · Not exact match | Tag input: one or more values; true if any matches |
+| Postal code | Exact match · Starts with · Not exact match | Tag input |
+| Country | Any of · None of | Searchable multi-select ("Search Countries") |
+| Province / State | Any of · None of | Searchable multi-select of provinces for the countries already chosen in this rule; free text otherwise |
+| Province code | Any of · None of | Tag input (e.g. `NY`, `ON`) |
+| Number / money (order total, quantities, order count, chargebacks) | Greater than · Less than · Equal to · Between | Number input; Between shows two. Money shows the store currency. |
+| Yes / No check (disposable email, address mismatch, data-centre IP, past fraud…) | Is true · Is false | none |
+| Choice (Shopify Risk Level, Protect eligibility, payment method, visitor flags) | Any of · None of | Multi-select of the fixed options |
+| IP address | Exact match · Starts with · In range (CIDR) | Tag input, validated |
+| Count in a time window (velocity, cross-customer) | Greater than | Number + "in the last [N] [hours / days]" |
+
+- Changing the Filter Type resets that row's Match Type and Value.
+- 🗑 removes a row; it's hidden when only one row is left.
+- **+ Add condition** adds a row under the last one.
+
+**Card 3 — Actions**
+
+*Post-order rules*
+- **Order Action** (radio, pick one): **Allow** · **Hold fulfillment** · **Cancel**.
+  - Cancel shows: ☑ Refund payment · ☑ Restock items · ☑ Notify customer (all ticked by default).
+- **Information** (optional, any combination):
+  - ☐ **Tag** → apply to Order / Customer / Both, plus a tag input.
+  - ☐ **Email notification** → "Send an email to `<alert email>`". If no alert email is set, a link to set one.
+- **Info banner** when Allow is chosen with no Tag or Email:
+  > **Only "allow" action selected.** This rule will still match according to the condition(s), but it will do nothing. It is purely informational and will prevent rules with lower priority from being executed.
+
+*Checkout rules*
+- **Checkout Action** (radio): **Allow** · **Hide payment methods** → multi-select of method names (default "Cash on Delivery") with free-text entry.
+- Same Allow banner.
+
+**Saving**
+- Shopify's contextual save bar (Save / Discard).
+- New rules go to the **bottom** of their list. The toast says *"Rule added at the bottom of the list. Move it up if it should run earlier."*
+- Validation errors appear under each input, plus a summary banner at the top.
+- Leaving with unsaved changes asks for confirmation.
+
+**Starter templates** (optional; about 1h of this feature): an "Add from template" menu on the list opens the builder pre-filled. Template rules are saved **disabled**.
+
+| Template | List | Conditions | Action |
+|---|---|---|---|
+| Hide COD for big orders | Checkout | Order Total greater than 300 | Hide "Cash on Delivery" |
+| Hide COD for risky visitors | Checkout | Visitor flagged any of datacenter, tor | Hide "Cash on Delivery" |
+| Hide COD for fraud customers | Checkout | Customer tag any of `cs-fraud` | Hide "Cash on Delivery" |
+| Cancel known fraud | Post-order | Matches past fraud is true | Cancel (refund, restock) + tag `cs-fraud` + email |
+| Disposable email | Post-order | Check if Disposable Email is true | Hold fulfillment + tag |
+| Address mismatch | Post-order | Billing vs. Shipping Address Mismatch is true | Hold fulfillment + tag + email |
+| Shopify high risk | Post-order | Shopify Risk Level any of High | Hold fulfillment + tag + email |
+| Micro orders (card testing) | Post-order | Order Total less than 2 | Hold fulfillment + tag + email |
+| New customer, big order | Post-order | Customer Order Count less than 1 AND Order Total greater than 500 | Hold fulfillment + tag + email |
 
 ### Tests
-- **Unit:** the builder's form state ↔ rule JSON round-trip; the field list is filtered by stage; every template passes validation.
+- **Unit:**
+  - Form state ↔ rule JSON round-trip for every field type.
+  - Match Type options per field type.
+  - The Filter Type list is filtered by stage.
+  - Between requires min < max.
+  - The Allow banner shows only for Allow with no extras.
+  - Every template passes validation.
 - **Manual:**
-  - Build each template from the UI, set it Live, and trigger it with a test order or checkout.
-  - Switch a rule's stage → incompatible conditions and actions are flagged.
-  - Delete a checkout rule → COD comes back.
+  - Recreate the reference list (Disposable Email → Cancel, Address mismatch → Hold, Shopify High Risk → Tag + Email + Hold, …). Check chips, badges, dates, truncation and the disabled ▶ state.
+  - Move rules up and down, including the first row, the last row and across pages. The order survives a refresh.
+  - Disable a rule → an order that matched it now falls through to the next rule.
+  - Put "Email contains `<your test email>` → Allow" at the top → your test orders are no longer held.
+  - Delete with the confirmation modal.
+  - Checkout list:
+    - Create "Order Total greater than 300 → Hide payment methods: Cash on Delivery" → COD hidden at checkout.
+    - Move an Allow rule above it → COD visible again.
+  - Search by partial name; pagination at 21+ rules.
 
 ### Done when
-- [ ] Every condition and action in Appendices A and B can be built in the UI
-- [ ] Templates create OFF rules that validate
-- [ ] Checkout rules sync on save
+- [ ] Rules list matches the reference layout for both lists
+- [ ] Every field in Appendix A can be added with the right Match Types and value input
+- [ ] Enable/disable, edit, delete and move up/down all persist
+- [ ] Checkout rule changes reach the checkout function
 
 ---
 
@@ -958,7 +1116,7 @@ model StaffAction {
 
 ### Backend
 - **List loader:**
-  - Tabs: In review (`REVIEW`), Cancelled (`CANCELLED`), Tagged (`TAGGED`), All flagged (any with matched rules), Errors (`ERROR`).
+  - Tabs: In review (`REVIEW`), Cancelled (`CANCELLED`), Tagged (`TAGGED`), All flagged (any with an applied rule or a test match), Errors (`ERROR`).
   - Paging (25 per page), filter by date range, search by order name.
 - **Detail loader:** the `OrderCheck` plus live order details fetched from Shopify (customer name, email, phone, addresses, items). Contact details are fetched live, never stored in plain text.
 - **Actions:**
@@ -970,10 +1128,10 @@ model StaffAction {
 - **Fraud list tab:** shows entries with type, order that created them and date. The value is a hash, so show *"Email from order #1042"* rather than the email.
 
 ### Frontend
-- **`app.orders._index.tsx`:** tabs + table (order, customer name (live), total, matched rules, status badge, date). Clicking a row opens the detail page.
+- **`app.orders._index.tsx`:** tabs + table (order, customer name (live), total, rule applied, status badge, date). Clicking a row opens the detail page.
 - **`app.orders.$id.tsx`:**
   - Header: order name, status badge, total, "Open in Shopify" link.
-  - Matched rules card: each rule with its reasons and whether it was Live or Test.
+  - Rule card: the rule that was applied with its reasons, plus any test-mode rules that matched.
   - Customer card: name, email, phone (clickable `tel:`), addresses.
   - Actions taken card: timeline of automatic and staff actions, including errors.
   - Buttons: Approve, Cancel, Mark as fraud (shown according to status).
@@ -1010,7 +1168,7 @@ Loader with a range parameter (`today`, `7d`, `30d`). Queries:
 - Orders in review, cancelled, tagged — counts on `OrderCheck` by status.
 - **Money saved** — sum of `total` for `CANCELLED` + `FRAUD` checks, grouped by currency.
 - Top 5 block reasons — unnest `Visit.flags` where action is `BLOCK`.
-- Top 5 rules — from `OrderCheck.matchedRules`.
+- Top 5 rules — from `OrderCheck.appliedRule`.
 - Setup health:
   - app embed enabled (the theme app embed setting via the Admin API, or "a visit was seen in the last 24 h")
   - checkout protection active (F09 `getStatus`)
@@ -1136,7 +1294,7 @@ None.
 - [ ] App embed on → visits logged with real IPs
 - [ ] Playwright bot run against the live store → blocked
 - [ ] Checkout rule hides COD
-- [ ] Order rules: review, cancel, tag, alert each work
+- [ ] Post-order rules: hold, cancel, allow, tag and email notification each work
 - [ ] The F12 full story passes
 - [ ] Uninstall → sessions removed; compliance webhooks reach the host
 
@@ -1148,51 +1306,88 @@ None.
 
 ## Appendix A — Condition catalog
 
-✅ = available · — = not available. Checkout fields come from the checkout function input; customer fields at checkout only exist for logged-in customers.
+Groups and labels are what the merchant sees in the **Filter Type** dropdown.
+- ✅ = available, — = not available.
+- **Checkout** fields come from the checkout function input. Customer fields there exist only for logged-in shoppers, and email only once entered.
+- Confirm in F09 exactly which delivery address fields the function input exposes. Any that aren't there become post-order only.
 
-| Group | Field key | Label | Type | Operators | Checkout | Order |
-|---|---|---|---|---|---|---|
-| Order | `cart.total` | Cart value | number | gt gte lt lte eq | ✅ | ✅ |
-| Order | `cart.item_count` | Number of items | number | gt gte lt lte eq | ✅ | ✅ |
-| Order | `cart.max_line_qty` | Most of one item | number | gt gte lt lte eq | ✅ | ✅ |
-| Order | `cart.product_ids` | Contains product | list | contains not_contains | ✅ | ✅ |
-| Order | `cart.collection_ids` | Contains product from collection | list | contains not_contains | ✅ | ✅ |
-| Order | `payment.gateway` | Payment method | text | eq neq contains | — | ✅ |
-| Address | `shipping.country` | Shipping country | country | eq neq in not_in | ✅ | ✅ |
-| Address | `shipping.zip` | Shipping postcode | text | eq neq starts_with in not_in | ✅ | ✅ |
-| Address | `shipping.city` | Shipping city | text | eq neq in not_in | ✅ | ✅ |
-| Address | `shipping.address1` | Shipping address | text | contains not_contains | ✅ | ✅ |
-| Address | `address.mismatch` | Billing ≠ shipping address | bool | is_true is_false | — | ✅ |
-| Address | `address.country_mismatch` | Billing country ≠ shipping country | bool | is_true is_false | — | ✅ |
-| Customer | `customer.tags` | Customer tag | list | contains not_contains | ✅ | ✅ |
-| Customer | `customer.order_count` | Customer's past orders | number | gt gte lt lte eq | ✅ | ✅ |
-| Customer | `customer.is_new` | New customer | bool | is_true is_false | — | ✅ |
-| Email | `email.domain` | Email domain | text | eq neq in not_in | ✅ | ✅ |
-| Email | `email.disposable` | Disposable email | bool | is_true is_false | — | ✅ |
-| Visitor | `visitor.flags` | Bot Block flagged visitor as | list | contains not_contains | ✅ | ✅ |
-| Network | `ip.country_mismatch` | IP country ≠ billing country | bool | is_true is_false | — | ✅ |
-| Network | `ip.datacenter` | IP is data-centre / VPN | bool | is_true is_false | — | ✅ |
-| Network | `ip.tor` | IP is Tor | bool | is_true is_false | — | ✅ |
-| Risk | `shopify.risk` | Shopify fraud risk | enum (low, medium, high) | eq in | — | ✅ |
-| Velocity | `velocity.same_ip` | Orders from same IP in last N hours | number + hours | gt gte | — | ✅ |
-| Velocity | `velocity.same_email` | Orders from same email in last N hours | number + hours | gt gte | — | ✅ |
-| Velocity | `velocity.same_phone` | Orders from same phone in last N hours | number + hours | gt gte | — | ✅ |
-| History | `fraud.match` | Matches a past fraud email / phone / address | bool | is_true | — | ✅ |
+| Group | Filter Type (label) | Key | Type | Checkout | Post-order |
+|---|---|---|---|---|---|
+| **Billing Address** | Billing Address - City | `billing.city` | text | — | ✅ |
+| | Billing Address - Country | `billing.country` | country | — | ✅ |
+| | Billing Address - Province/State | `billing.province` | province | — | ✅ |
+| | Billing Address - Postal Code | `billing.zip` | zip | — | ✅ |
+| | Billing Address - Address Line 1 | `billing.address1` | text | — | ✅ |
+| | Billing Address - Address Line 2 | `billing.address2` | text | — | ✅ |
+| | Billing Address - Company | `billing.company` | text | — | ✅ |
+| | Billing Address - First Name | `billing.first_name` | text | — | ✅ |
+| | Billing Address - Last Name | `billing.last_name` | text | — | ✅ |
+| | Billing Address - Full Name | `billing.name` | text | — | ✅ |
+| | Billing Address - Phone | `billing.phone` | text | — | ✅ |
+| | Billing Address - Province Code | `billing.province_code` | provinceCode | — | ✅ |
+| **Shipping Address** | Shipping Address - City | `shipping.city` | text | ✅ | ✅ |
+| | Shipping Address - Country | `shipping.country` | country | ✅ | ✅ |
+| | Shipping Address - Province/State | `shipping.province` | province | — | ✅ |
+| | Shipping Address - Postal Code | `shipping.zip` | zip | ✅ | ✅ |
+| | Shipping Address - Address Line 1 | `shipping.address1` | text | ✅ | ✅ |
+| | Shipping Address - Address Line 2 | `shipping.address2` | text | ✅ | ✅ |
+| | Shipping Address - Company | `shipping.company` | text | ✅ | ✅ |
+| | Shipping Address - First Name | `shipping.first_name` | text | ✅ | ✅ |
+| | Shipping Address - Last Name | `shipping.last_name` | text | ✅ | ✅ |
+| | Shipping Address - Full Name | `shipping.name` | text | ✅ | ✅ |
+| | Shipping Address - Phone | `shipping.phone` | text | ✅ | ✅ |
+| | Shipping Address - Province Code | `shipping.province_code` | provinceCode | ✅ | ✅ |
+| **Browser Detail** | IP Address | `ip.address` | ip | — | ✅ |
+| | IP Country | `ip.country` | country | — | ✅ |
+| | IP is Data-centre / VPN | `ip.datacenter` | bool | — | ✅ |
+| | IP is Tor | `ip.tor` | bool | — | ✅ |
+| | IP Country vs. Billing Country Mismatch | `ip.country_mismatch` | bool | — | ✅ |
+| | Visitor Flagged by Bot Block | `visitor.flags` | choice: automation, extension, datacenter, tor, asn_blocked, country_blocked, speed | ✅ | ✅ |
+| **Cross-Customer Detection** | Customer Name Used by Other Customers | `cross.name` | window-count | — | ✅ |
+| | Phone Used by Other Customers | `cross.phone` | window-count | — | ✅ |
+| | Shipping Address Used by Other Customers | `cross.address` | window-count | — | ✅ |
+| **Customer** | Email | `customer.email` | text | ✅ | ✅ |
+| | Phone Number | `customer.phone` | text | — | ✅ |
+| | Customer Name | `customer.name` | text | — | ✅ |
+| | Customer Order Count | `customer.order_count` | number | ✅ | ✅ |
+| | Customer Chargebacks | `customer.chargebacks` | number | — | ✅ |
+| | Check if Disposable Email | `customer.disposable_email` | bool | — | ✅ |
+| | Customer Tag | `customer.tags` | choice (free tags) | ✅ | ✅ |
+| **Order** | Order Total | `order.total` | money | ✅ | ✅ |
+| | Total Item Quantity | `order.item_qty` | number | ✅ | ✅ |
+| | Individual Item Quantity | `order.max_line_qty` | number | ✅ | ✅ |
+| | Payment Method | `order.gateway` | choice (names seen on orders + free text) | — | ✅ |
+| **Risk Assessment** | Shopify Risk Level | `risk.shopify` | choice: Low, Medium, High | — | ✅ |
+| | Billing vs. Shipping Address Mismatch | `risk.address_mismatch` | bool | — | ✅ |
+| | Billing vs. Shipping Country Mismatch | `risk.country_mismatch` | bool | — | ✅ |
+| | Shopify Protect Eligibility | `risk.protect` | choice (values from the API) | — | ✅ |
+| **Velocity** | Orders from Same IP | `velocity.ip` | window-count | — | ✅ |
+| | Orders from Same Email | `velocity.email` | window-count | — | ✅ |
+| | Orders from Same Phone | `velocity.phone` | window-count | — | ✅ |
+| **Fraud History** | Matches Past Fraud (email, phone or address) | `fraud.match` | bool | — | ✅ |
 
-**Notes**
-- `email.domain` at checkout only exists once the shopper has entered an email, and depends on what the function input exposes. Confirm in F09.
-- The disposable-email list is too big for the function config, so it's order-only.
-- `visitor.flags` values: `automation`, `extension`, `datacenter`, `tor`, `asn_blocked`, `country_blocked`, `speed`.
+**Where the harder fields come from (F08)**
+
+| Field | Source |
+|---|---|
+| **Customer Chargebacks** | Disputes on the customer's previous orders. Needs the disputes read scope. Data exists mainly for Shopify Payments stores; elsewhere the field is empty (and so never matches). |
+| **Shopify Protect Eligibility** | The order's Shopify Protect status. Only some stores and regions have it; hide the field when the API returns nothing for the store. |
+| **Cross-customer counts** | Number of **different** customers (by customer ID, else email hash) who used the same name / phone / shipping address hash within the window, from `OrderCheck`. |
+| **Velocity** | Number of orders with the same IP / email hash / phone hash within the window, excluding the current order. |
 
 ## Appendix B — Action catalog
 
-| Action | Stage | Options | Notes |
-|---|---|---|---|
-| Hide payment methods | Checkout | method names (default "Cash on Delivery") | Never hides every method |
-| Put in review | Order | — | Fulfilment hold + tag `cs-review` |
-| Auto-cancel | Order | Refund, Restock, Email customer | Beats review; tag `cs-cancelled` |
-| Tag | Order | target (order / customer / both), tags | Union across rules |
-| Email alert | Order | — | One email per order |
+| List | Action | Kind | Options | Notes |
+|---|---|---|---|---|
+| Checkout | Allow | main | — | Stops the list; nothing hidden |
+| Checkout | Hide payment methods | main | method names (default "Cash on Delivery") | Never hides every method |
+| Post-order | Allow | main | — | Stops the list; Tag / Email still run if ticked |
+| Post-order | Hold fulfillment | main | — | Fulfilment hold + tag `cs-review`; shows under Orders › In review |
+| Post-order | Cancel | main | Refund payment, Restock items, Notify customer | Tag `cs-cancelled` |
+| Post-order | Tag | information | Order / Customer / Both + tags | |
+| Post-order | Email notification | information | — | One email to the alert address |
+
+Only the **first matching enabled rule** in a list acts. Test-mode rules only log.
 
 ## Appendix C — Tags, attributes and names
 
