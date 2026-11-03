@@ -1,6 +1,10 @@
-# Stagepay (Deposit & Balance App) — Build Specification
+# Stagepay: B2B Deposit — Build Specification
 
-Version 1.2 · 2026-11-03 · Source documents: *Deposit & Balance App – Requirements* (merchant brief), *Deposit_App_Estimate.xlsx*, *Build_Order_Estimate.xlsx*, *docs/feasibility-test-guide.md*
+**App name:** Stagepay · **App Store listing:** *Stagepay: B2B Deposit* · **Audience:** B2B / wholesale and made-to-order merchants
+
+Version 1.3 (final) · 2026-11-03 · Source documents: *Deposit & Balance App – Requirements* (merchant brief), *Deposit_App_Estimate.xlsx*, *Build_Order_Estimate.xlsx*, *docs/feasibility-test-guide.md*
+
+**Changes in 1.3:** final app name *Stagepay: B2B Deposit*; positioned as a B2B app; all technical identifiers use `stagepay` (metafield namespace, selling plan merchant code, order tags, extension names, order-note prefix) — see section 2 *Naming*.
 
 **Changes in 1.2:** reminder on/off and days moved from Settings to the Dashboard (P1 "Reminders" panel); collection method and days-before-overdue moved from Settings into each rule (P4) and copied onto each order when it is placed.
 
@@ -39,7 +43,11 @@ App scaffolding (Shopify CLI template, auth, hosting, CI) is **out of scope** of
 
 ## 1. Product summary
 
-A public Shopify app that lets B2B and made-to-order merchants **take a deposit at checkout and collect the remaining balance later, on one Shopify order**, on every Shopify plan.
+**Stagepay: B2B Deposit** is a public Shopify app for **B2B, wholesale and made-to-order merchants**. It lets them **take a deposit at checkout and collect the remaining balance later, on one Shopify order**, on every Shopify plan.
+
+**Core features:** deposit rules per product/collection · deposit at checkout with one *Partially paid* order · balance collection by saved card, payment link or recorded bank transfer · automatic reminders and overdue alerts · dashboard of deposits held, balances owed and overdue orders.
+
+**Typical buyers:** restaurants, hotels, offices, retailers and contractors placing large, made-to-order or bulk orders with the merchant.
 
 **v1 scope:** one deposit + one balance payment (e.g. 30% / 70%). The data model supports N payment steps so that 3–4 step schedules (Appendix C) need no schema change.
 
@@ -73,6 +81,19 @@ A public Shopify app that lets B2B and made-to-order merchants **take a deposit 
 | Feature flags | `ShopSettings.features` JSON for plan-gated or beta features. |
 | Naming | Files `kebab-case`, services `<domain>.server.ts`, routes per React Router file conventions. |
 | Testing | Vitest (unit + integration with a test Postgres), Playwright (admin UI + storefront E2E on a development store), recorded GraphQL fixtures for Shopify responses. |
+
+### Naming
+
+| Item | Name |
+|---|---|
+| App / brand | Stagepay (listing: *Stagepay: B2B Deposit*) |
+| Metafield namespace (app-owned) | `stagepay` (keys: `policy`, `policies`, `plan_ids`, `minimums`, `schedule`) |
+| Selling plan `merchantCode` | `stagepay-<ruleId>` |
+| Order tags | `stagepay-deposit-paid`, `stagepay-balance-due`, `stagepay-overdue`, `stagepay-paid` |
+| Order note prefix | `[Stagepay]` |
+| Theme extension / block | `stagepay-block` / `stagepay-deposit` ("Stagepay deposit") |
+| Validation Function | `stagepay-min-order` |
+| Email From | `"<Shop name>" <notifications@mail.stagepay.app>` |
 
 ### Shared status enums
 
@@ -144,8 +165,8 @@ Build in the order money flows: rule → product page → order → collect bala
 | P5 | Settings | `/app/settings` |
 | P6 | Email templates (list + editor) | `/app/settings/emails`, `/app/settings/emails/:key` |
 | P7 | Plan & billing | `/app/billing` |
-| E1 | Theme app extension "Deposit details" (product page) | `extensions/deposit-block` |
-| E2 | Cart & checkout validation Function (minimum order) | `extensions/deposit-min-order` |
+| E1 | Theme app extension "Stagepay deposit" (product page) | `extensions/stagepay-block` |
+| E2 | Cart & checkout validation Function (minimum order) | `extensions/stagepay-min-order` |
 | BG | Background: webhooks, jobs, emails (no UI) | server |
 
 ---
@@ -185,7 +206,7 @@ Each step names who acts and where (page, extension, BG = background, Shopify = 
 1. Shopify webhook `orders/create` → BG.
 2. BG detects our selling plan; saves total/paid/outstanding, mandate id, payment link.
 3. BG copies the rule's collection method and days before overdue onto the order (later rule edits don't change it).
-4. BG creates steps: Deposit $3,000 PAID · Balance $7,000 WAITING; tags `deposit-paid`, `balance-due`; note line; schedules DAYS_AFTER_ORDER trigger if set; increments Free-plan usage.
+4. BG creates steps: Deposit $3,000 PAID · Balance $7,000 WAITING; tags `stagepay-deposit-paid`, `stagepay-balance-due`; note line; schedules DAYS_AFTER_ORDER trigger if set; increments Free-plan usage.
 5. P1 lists it under **Balance due**.
 
 ### Flow 7 — Start the balance request (3 triggers)
@@ -198,7 +219,7 @@ BG first re-syncs the order (already paid → stop) and locks the step (double c
 ### Flow 8 — Collect by saved card
 1. BG creates a PaymentAttempt with a unique idempotency key and calls `orderCreateMandatePayment` for $7,000.
 2. BG polls `orderPaymentStatus` every 15 s.
-3. Success → same order *Paid*; step PAID; tags `deposit-fully-paid`; note line; reminders cancelled; buyer email "Payment received"; P2 toast "Balance paid".
+3. Success → same order *Paid*; step PAID; tags `stagepay-paid`; note line; reminders cancelled; buyer email "Payment received"; P2 toast "Balance paid".
 4. Failure → Flow 12.
 
 ### Flow 9 — Collect by payment link
@@ -216,7 +237,7 @@ BG first re-syncs the order (already paid → stop) and locks the step (double c
 
 ### Flow 11 — Reminders and overdue
 1. Days 3, 7, 14 after request (set in the P1 **Reminders** panel; skipped entirely if reminders are off) → BG sends reminder with Pay now link (skipped if paid/cancelled).
-2. Due date passed and unpaid → daily BG check sets OVERDUE, tag `balance-overdue`, staff alert email.
+2. Due date passed and unpaid → daily BG check sets OVERDUE, tag `stagepay-overdue`, staff alert email.
 3. P1 Overdue tab; P2 red banner "Do not ship: $7,000 unpaid"; staff can resend link, charge again or record payment.
 
 ### Flow 12 — Failed card payment
@@ -474,7 +495,7 @@ mutation CreateDepositPlan($input: SellingPlanGroupInput!, $resources: SellingPl
 {
   "input": {
     "name": "<rule.buyerLabel>",
-    "merchantCode": "deposit-<rule.id>",
+    "merchantCode": "stagepay-<rule.id>",
     "options": ["Deposit"],
     "sellingPlansToCreate": [{
       "name": "<rule.buyerLabel>",
@@ -650,9 +671,9 @@ enum CollectionMethod   { SAVED_CARD PAYMENT_LINK MANUAL_RECORD }
 3. **Update**: overwrite `totalAmount/paidAmount/outstandingAmount` from Shopify (P1). Recompute step 2 amount = outstanding while step 2 not PAID. Match new successful transactions (kind `SALE`/`CAPTURE`, status `SUCCESS`) not yet in any `transactionGids` to the lowest unpaid step.
 4. **Status rules** (in order): cancelled → CANCELLED · outstanding ≤ 0 → PAID (step 2 PAID, cancel reminders) · step FAILED → PAYMENT_FAILED · now > `balanceDueAt` and step REQUESTED → OVERDUE · step REQUESTED → BALANCE_REQUESTED · else DEPOSIT_PAID.
 5. **Shopify writes** (only when changed):
-   - Tags via `tagsAdd`/`tagsRemove`: `deposit-paid`, `balance-due`, `balance-overdue`, `deposit-fully-paid`.
-   - App-owned metafield `$app:deposit.schedule` (JSON: steps, statuses) for later admin extensions.
-   - Order note: append a line per payment event via `orderUpdate(input:{id, note})` (e.g. `[Deposit app] 2026-11-03 Balance $7,000.00 paid by card`). The public API has no timeline-comment mutation, so the note is used instead of the timeline (adjusts FR-20).
+   - Tags via `tagsAdd`/`tagsRemove`: `stagepay-deposit-paid`, `stagepay-balance-due`, `stagepay-overdue`, `stagepay-paid`.
+   - App-owned metafield `$app:stagepay.schedule` (JSON: steps, statuses) for later admin extensions.
+   - Order note: append a line per payment event via `orderUpdate(input:{id, note})` (e.g. `[Stagepay] 2026-11-03 Balance $7,000.00 paid by card`). The public API has no timeline-comment mutation, so the note is used instead of the timeline (adjusts FR-20).
 
 **Daily job `orders.overdueScan`** (cron 06:00 shop time): REQUESTED steps with `balanceDueAt < now` → OVERDUE + staff alert (Module 5).
 
@@ -685,7 +706,7 @@ Make the deposit option clear on the product page and enforce the minimum order 
 **Covers:** FR-7, FR-8, FR-3 (enforcement).
 
 ### 3.1 Design
-Theme app block **"Deposit details"** (product section), shown only when the product has one of our selling plans:
+Theme app block **"Stagepay deposit"** (product section), shown only when the product has one of our selling plans:
 
 ```
 ○ Pay in full – $1,000
@@ -699,19 +720,19 @@ Theme app block **"Deposit details"** (product section), shown only when the pro
 - Block settings (theme editor): default choice (Pay in full / Deposit), show policy (on/off), text colour, "Hide selector if the theme already shows purchase options" (on/off, for themes with a native picker, to avoid two selectors).
 
 ### 3.2 Database
-None. Policy text exposed through an **app-owned shop metafield** `$app:deposit.policy` (written by Module 1/7 on save) so Liquid can read it as `app.metafields.deposit.policy`.
+None. Policy text exposed through an **app-owned shop metafield** `$app:stagepay.policy` (written by Module 1/7 on save) so Liquid can read it as `app.metafields.stagepay.policy`.
 
 ### 3.3 Backend
 - `metafields.server.ts`: `setShopAppMetafield(key, value)` via `metafieldsSet` on the app installation owner.
-- **Cart & checkout validation Function** (`extensions/deposit-min-order`): if any cart line has a deposit selling plan and cart subtotal < rule.minOrderValue → error "Deposit option requires an order of at least $5,000." Rule minimums are passed to the Function through a shop metafield `$app:deposit.minimums` (`{sellingPlanId: amount}`), updated by `rules.sync`.
+- **Cart & checkout validation Function** (`extensions/stagepay-min-order`): if any cart line has a deposit selling plan and cart subtotal < rule.minOrderValue → error "Deposit option requires an order of at least $5,000." Rule minimums are passed to the Function through a shop metafield `$app:stagepay.minimums` (`{sellingPlanId: amount}`), updated by `rules.sync`.
 
 ### 3.4 Frontend (extension files)
 | File | Content |
 |---|---|
-| `extensions/deposit-block/blocks/deposit-details.liquid` | Reads `product.selling_plan_groups`, `selling_plan.checkout_charge.value_type` / `.value`, `product.selected_or_first_available_variant.price`; renders amounts with `money` filter |
-| `extensions/deposit-block/assets/deposit-details.js` | Renders/handles the selector; sets the hidden `selling_plan` input in the product form; listens to variant/quantity changes (`change` on product form); recalculates amounts; no external requests |
-| `extensions/deposit-block/assets/deposit-details.css` | Minimal styles inheriting theme fonts/colours |
-| `extensions/deposit-min-order/src/run.ts` | Validation Function |
+| `extensions/stagepay-block/blocks/stagepay-deposit.liquid` | Reads `product.selling_plan_groups`, `selling_plan.checkout_charge.value_type` / `.value`, `product.selected_or_first_available_variant.price`; renders amounts with `money` filter |
+| `extensions/stagepay-block/assets/stagepay.js` | Renders/handles the selector; sets the hidden `selling_plan` input in the product form; listens to variant/quantity changes (`change` on product form); recalculates amounts; no external requests |
+| `extensions/stagepay-block/assets/stagepay.css` | Minimal styles inheriting theme fonts/colours |
+| `extensions/stagepay-min-order/src/run.ts` | Validation Function |
 
 ### 3.5 Tests
 | Type | Case |
@@ -1044,7 +1065,7 @@ Store-level configuration, first-run guide, and hiding features the store's Shop
 
 **Onboarding checklist** (dashboard top, dismissible, stored in settings):
 1. Create your first deposit rule → `/app/rules/new`
-2. Add the "Deposit details" block to your product page → deep link `https://{shop}/admin/themes/current/editor?template=product&addAppBlockId={api_key}/deposit-details&target=mainSection`
+2. Add the "Stagepay deposit" block to your product page → deep link `https://{shop}/admin/themes/current/editor?template=product&addAppBlockId={api_key}/stagepay-deposit&target=mainSection`
 3. Place a test order → help text with test card numbers
 4. Collect a test balance → link to the test order
 
@@ -1072,7 +1093,7 @@ model ShopSettings {
 ### 7.3 Backend
 - `settings.server.ts`: get-or-create defaults on install; zod validation (emails). Reminder validation (days 1–60 ascending, ≤ 5) is shared with the P1 Reminders panel.
 - `plan.server.ts`: on install and on `shop/update` webhook → refresh `Shop.planName/isPlus`; compute `features` from plan + spike results table (constant in code).
-- On save: write `$app:deposit.policy` metafield (Module 3).
+- On save: write `$app:stagepay.policy` metafield (Module 3).
 
 ### 7.4 Frontend
 | File | Content |
@@ -1522,8 +1543,8 @@ enum ActorType { STAFF SYSTEM WEBHOOK }
 **Extensions**
 | Extension | Type | Module |
 |---|---|---|
-| `deposit-block` | Theme app extension (app block) | 3 |
-| `deposit-min-order` | Cart & checkout validation Function | 3 |
+| `stagepay-block` | Theme app extension (app block) | 3 |
+| `stagepay-min-order` | Cart & checkout validation Function | 3 |
 
 ---
 
@@ -1536,7 +1557,7 @@ Designed-for but not built in v1. The schema already supports N `PaymentStep`s.
 | 3+ payment steps (e.g. 40/30/30) | Middle steps need partial charge (spike S4) or manual record; payment link for partial amounts per spike S5 |
 | Deposits on quotes / draft orders | Draft order deposit fields (Plus, API 2026-07); non-Plus via checkout link carrying selling plan — to verify |
 | Deposit then net 30 | Payment terms after fulfillment |
-| Admin order-page block | Admin UI extension reading `$app:deposit.schedule` metafield |
+| Admin order-page block | Admin UI extension reading `$app:stagepay.schedule` metafield |
 | Customer account extension | Schedule + "Pay balance" in new customer accounts |
 | PDF invoices & statements | Per payment step + open-balance statement |
 | QuickBooks / Xero sync | Deposits as customer-deposit liability |

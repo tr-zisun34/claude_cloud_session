@@ -1,11 +1,11 @@
-# Stagepay — Development Guide
+# Stagepay: B2B Deposit — Development Guide
 
-**App:** Stagepay · **App Store listing:** *Stagepay: Milestone Payments*
-Version 1.1 · 2026-11-03 · Matches spec v1.2 (reminders on the Dashboard; collection method and days before overdue per rule)
+**App:** Stagepay · **App Store listing:** *Stagepay: B2B Deposit* · **Audience:** B2B / wholesale and made-to-order merchants
+Version 1.2 (final) · 2026-11-03 · Matches spec v1.3 (final name; reminders on the Dashboard; collection method and days before overdue per rule)
 
-This guide is the hands-on companion to **`docs/deposit-app-spec.md` (v1.1)**. The spec says **what** to build; this guide says **how**, step by step, in the agreed build order (0 → 13). Each step is built, tested and signed off before the next one starts.
+This guide is the hands-on companion to **`docs/deposit-app-spec.md` (v1.3)**. The spec says **what** to build; this guide says **how**, step by step, in the agreed build order (0 → 13). Each step is built, tested and signed off before the next one starts.
 
-> **Naming:** the spec was written before the app had a name. Wherever the spec says `deposit` in a technical identifier, use **`stagepay`** instead (see [Naming](#3-naming)). Behaviour is unchanged.
+> **Naming:** the spec and this guide use the same `stagepay` identifiers (see [Naming](#3-naming)). The App Store listing name is **Stagepay: B2B Deposit**.
 
 ---
 
@@ -153,7 +153,7 @@ Add to `package.json`: `"worker": "tsx app/worker.ts"` (dev) and a build step fo
 
 | Item | Name |
 |---|---|
-| App / brand | Stagepay |
+| App / brand | Stagepay (listing: *Stagepay: B2B Deposit*) |
 | Metafield namespace (app-owned) | `stagepay` (keys: `policy`, `minimums`, `schedule`) |
 | Selling plan `merchantCode` | `stagepay-<ruleId>` |
 | Order tags | `stagepay-deposit-paid`, `stagepay-balance-due`, `stagepay-overdue`, `stagepay-paid` |
@@ -1270,7 +1270,7 @@ Bug fixing: log every failure as an issue, fix, re-run the affected rows.
 - [ ] Email domain `mail.stagepay.app` verified (SPF, DKIM, Return-Path)
 - [ ] Protected scopes approved
 - [ ] Billing set to live (`isTest` false for non-dev stores)
-- [ ] Listing: **Stagepay: Milestone Payments**, tagline, description, 5 screenshots (P1, P2, P4, E1, email), demo video, support email, privacy policy URL, FAQ
+- [ ] Listing: **Stagepay: B2B Deposit**, tagline (e.g. "Take B2B deposits now, collect the balance later"), description aimed at wholesale and made-to-order merchants, 5 screenshots (P1, P2, P4, E1, email), demo video, support email, privacy policy URL, FAQ
 - [ ] Setup guide + user guide published
 - [ ] 2–3 beta merchants installed via direct link; one small live order ($10 product, $3 deposit) collected and refunded
 - [ ] Submit for review
