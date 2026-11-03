@@ -30,6 +30,7 @@ No real money is used. Everything runs on free development stores with test card
 | T9 | Webhooks arrive for order, payment, fulfillment | ☐ ☐ | ☐ ☐ | v1 — **must pass** |
 | T10 | Theme shows the deposit option (Dawn) | ☐ ☐ | ☐ ☐ | v1 — **must pass** |
 | T11 | Which scopes need Shopify approval, and lead time | — | — | v1 planning |
+| T12 | After uninstalling the test app, is the deposit option removed from the product? | ☐ Removed ☐ Stays | ☐ Removed ☐ Stays | v1 uninstall cleanup |
 
 ---
 
@@ -76,7 +77,7 @@ Edit `shopify.app.toml` → `[access_scopes]`:
 
 ```toml
 [access_scopes]
-scopes = "read_products,write_products,read_purchase_options,write_purchase_options,read_orders,write_orders,read_customers,read_payment_mandate,write_payment_mandate,read_fulfillments"
+scopes = "read_products,write_products,read_purchase_options,write_purchase_options,read_orders,write_orders,read_payment_terms,read_customers,read_payment_mandate,write_payment_mandate,read_fulfillments"
 
 [webhooks]
 api_version = "2026-10"
@@ -306,6 +307,13 @@ While `shopify app dev` runs, the terminal (or your `/webhooks` route log) shows
 - Where Shopify asks you to request access and the stated review time.
 
 If approval takes weeks → start the request **now**, and build v1 with **payment link first**, saved-card charging behind a feature flag.
+
+### T12 — Uninstall behaviour (run last on each store)
+1. Note the product's `.js` page shows `selling_plan_groups` with the deposit option.
+2. Uninstall the test app (**Settings → Apps → Uninstall**).
+3. Reload `/products/oak-dining-table.js`.
+
+**Record:** whether `selling_plan_groups` is now empty (Shopify removed the app's deposit option) or still lists it. If it stays, the spec needs a cleanup step before uninstall (e.g. a "Remove deposit options" button in Settings).
 
 ---
 

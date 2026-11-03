@@ -1,6 +1,8 @@
 # Deposit & Balance App — Build Specification
 
-Version 1.0 · 2026-11-02 · Source documents: *Deposit & Balance App – Requirements* (merchant brief) and *Deposit_App_Estimate.xlsx*
+Version 1.1 · 2026-11-03 · Source documents: *Deposit & Balance App – Requirements* (merchant brief), *Deposit_App_Estimate.xlsx*, *Build_Order_Estimate.xlsx*, *docs/feasibility-test-guide.md*
+
+**Changes in 1.1:** user flows added (section 5); build order and hours aligned with *Build_Order_Estimate.xlsx*; theme block now always renders its own deposit selector (Dawn shows none — feasibility test T10); `read_payment_terms` scope added; feasibility results T1–T3 recorded; untracked Free-plan orders become tracked after upgrade.
 
 This spec turns the merchant requirements into buildable modules. Each module is self-contained:
 **Design → Database → Backend → Frontend → Tests → Done criteria**, so one module can be designed, built and tested before the next starts.
@@ -15,20 +17,21 @@ App scaffolding (Shopify CLI template, auth, hosting, CI) is **out of scope** of
 2. [Global conventions](#2-global-conventions)
 3. [Data model overview](#3-data-model-overview)
 4. [Build order](#4-build-order)
-5. [Module 0 — Foundations & payment feasibility spike](#module-0--foundations--payment-feasibility-spike)
-6. [Module 1 — Deposit rules & selling plan sync](#module-1--deposit-rules--selling-plan-sync)
-7. [Module 2 — Order sync & payment status engine](#module-2--order-sync--payment-status-engine)
-8. [Module 3 — Storefront (theme block & validation)](#module-3--storefront-theme-block--validation)
-9. [Module 4 — Balance collection](#module-4--balance-collection)
-10. [Module 5 — Emails & reminders](#module-5--emails--reminders)
-11. [Module 6 — Dashboard & order detail](#module-6--dashboard--order-detail)
-12. [Module 7 — Settings, onboarding & plan detection](#module-7--settings-onboarding--plan-detection)
-13. [Module 8 — App billing (Free / Pro)](#module-8--app-billing-free--pro)
-14. [Module 9 — Compliance, security & audit log](#module-9--compliance-security--audit-log)
-15. [Module 10 — End-to-end QA & launch](#module-10--end-to-end-qa--launch)
-16. [Appendix A — Full Prisma schema](#appendix-a--full-prisma-schema)
-17. [Appendix B — Shopify scopes, webhooks & APIs](#appendix-b--shopify-scopes-webhooks--apis)
-18. [Appendix C — Later phases (not in v1)](#appendix-c--later-phases-not-in-v1)
+5. [User flows](#5-user-flows)
+6. [Module 0 — Foundations & payment feasibility spike](#module-0--foundations--payment-feasibility-spike)
+7. [Module 1 — Deposit rules & selling plan sync](#module-1--deposit-rules--selling-plan-sync)
+8. [Module 2 — Order sync & payment status engine](#module-2--order-sync--payment-status-engine)
+9. [Module 3 — Storefront (theme block & validation)](#module-3--storefront-theme-block--validation)
+10. [Module 4 — Balance collection](#module-4--balance-collection)
+11. [Module 5 — Emails & reminders](#module-5--emails--reminders)
+12. [Module 6 — Dashboard & order detail](#module-6--dashboard--order-detail)
+13. [Module 7 — Settings, onboarding & plan detection](#module-7--settings-onboarding--plan-detection)
+14. [Module 8 — App billing (Free / Pro)](#module-8--app-billing-free--pro)
+15. [Module 9 — Compliance, security & audit log](#module-9--compliance-security--audit-log)
+16. [Module 10 — End-to-end QA & launch](#module-10--end-to-end-qa--launch)
+17. [Appendix A — Full Prisma schema](#appendix-a--full-prisma-schema)
+18. [Appendix B — Shopify scopes, webhooks & APIs](#appendix-b--shopify-scopes-webhooks--apis)
+19. [Appendix C — Later phases (not in v1)](#appendix-c--later-phases-not-in-v1)
 
 ---
 
@@ -104,21 +107,160 @@ Each module below defines the tables it owns. The combined schema is in [Appendi
 
 ## 4. Build order
 
-| Order | Module | Depends on | Est. hours* |
-|---|---|---|---|
-| 0 | Foundations & payment spike | — | 14 |
-| 1 | Deposit rules & selling plan sync | 0 | 23 |
-| 2 | Order sync & status engine | 0, 1 | 20 |
-| 3 | Storefront | 1 | 9 (+4 validation) |
-| 4 | Balance collection | 2 | 23 |
-| 5 | Emails & reminders | 2, 4 | 16 |
-| 6 | Dashboard & order detail | 2, 4, 5 | 13 |
-| 7 | Settings, onboarding, plan detection | 0 | 8 |
-| 8 | App billing | 2 | 5 |
-| 9 | Compliance, security, audit | all | 7 |
-| 10 | E2E QA & launch | all | 25 |
+Build in the order money flows: rule → product page → order → collect balance → emails → polish. Each step can be tested with real test orders before the next starts.
 
-\*From *Deposit_App_Estimate.xlsx* (base hours, before 20% contingency).
+| Step | Build | Pages / extensions | Spec module | Est. hours* |
+|---|---|---|---|---|
+| 0 | Foundations: shop record, Shopify client, jobs, webhook receiver | — | 0 | 14 |
+| 1 | Deposit rules list + create/edit rule, selling plan sync | P3, P4 | 1 | 19 |
+| 2 | Theme app extension: own deposit selector + amounts + policy | E1 | 3 | 13 |
+| 3 | Order sync & status engine | — | 2 | 20 |
+| 4 | Dashboard, simple version (orders list) | P1 (part) | 6 | 5 |
+| 5 | Order detail + Collect balance / Record payment | P2 | 4, 6 | 28 |
+| 6 | Emails with default wording + reminders | — | 5 | 13 |
+| 7 | Settings + plan detection | P5 | 7 | 5 |
+| 8 | Email templates editor | P6 | 5 | 3 |
+| 9 | Dashboard, full version: totals, tabs, setup checklist | P1 (finish) | 6, 7 | 6 |
+| 10 | Plan & billing + usage limit | P7 | 8 | 5 |
+| 11 | Checkout validation Function (minimum order value) | E2 | 3 | 4 |
+| 12 | Privacy webhooks, uninstall cleanup, activity log | P2 section | 9 | 7 |
+| 13 | Full testing and launch | — | 10 | 29 |
+| | **Base total** | | | **171** |
+
+\*From *Build_Order_Estimate.xlsx* (base hours; +20% buffer = 205 hours ≈ 5 weeks for one developer).
+
+**Milestones:** after step 2 buyers can pay a deposit · after step 5 the app works end to end (demo-able) · after step 6 no manual chasing · after step 10 ready to sell · after step 13 ready for App Store review.
+
+### Pages and extensions (v1)
+
+| Code | Page / extension | Route / location |
+|---|---|---|
+| P1 | Dashboard (home) | `/app` |
+| P2 | Order detail (+ Collect balance, Record payment pop-ups) | `/app/orders/:id` |
+| P3 | Deposit rules list | `/app/rules` |
+| P4 | Create / edit rule | `/app/rules/new`, `/app/rules/:id` |
+| P5 | Settings | `/app/settings` |
+| P6 | Email templates (list + editor) | `/app/settings/emails`, `/app/settings/emails/:key` |
+| P7 | Plan & billing | `/app/billing` |
+| E1 | Theme app extension "Deposit details" (product page) | `extensions/deposit-block` |
+| E2 | Cart & checkout validation Function (minimum order) | `extensions/deposit-min-order` |
+| BG | Background: webhooks, jobs, emails (no UI) | server |
+
+---
+
+## 5. User flows
+
+Each step names who acts and where (page, extension, BG = background, Shopify = Shopify's own checkout/admin). Example order: 20 tables, $10,000, 30% deposit.
+
+### Flow 1 — Install and first setup
+1. Merchant installs from the App Store and approves scopes (Shopify).
+2. BG saves the shop (name, currency, timezone, plan), creates default settings, the 7 default emails and the Free plan; sets plan-based features.
+3. P1 shows the setup checklist: ① create a rule ② add the block to the product page ③ place a test order ④ collect a test balance.
+
+### Flow 2 — Create a deposit rule
+1. P3 → **Create rule**.
+2. P4: name, 30%, products/collection, minimum order $5,000, balance trigger, buyer label, policy; live preview "$10,000 → $3,000 today, $7,000 later".
+3. P4 validates (targets, 1–99%, no product in two active rules) → **Save**.
+4. BG creates the selling plan group in Shopify and attaches products; writes policy metafield (for E1) and minimums metafield (for E2).
+5. P3 shows **Active · Synced** (or **Sync failed · Retry**).
+
+### Flow 3 — Edit, turn off or delete a rule
+- Edit (P4): Shopify plan updated; existing orders keep their schedule.
+- Turn off (P3 switch) / Delete (P4): selling plan group deleted; existing orders unaffected.
+
+### Flow 4 — Add the block to the product page (once)
+1. P1 checklist ② → deep link opens the theme editor with E1 added.
+2. Merchant adjusts block settings → **Save**. Required because Dawn renders no selling-plan picker (feasibility T10).
+
+### Flow 5 — Buyer places a deposit order
+1. Product page + E1: ○ Pay in full · ● Pay 30% deposit — $300 today, $700 later · policy.
+2. Buyer picks deposit, quantity 10 → E1 shows $3,000 today, $7,000 later → Add to cart (cart line shows the plan name).
+3. Shopify checkout + E2: $10,000 ≥ $5,000 → allowed (below minimum → "Deposit option requires an order of at least $5,000", checkout blocked).
+4. Shopify checkout: due today $3,000 / due later $7,000; buyer pays; card vaulted.
+5. Shopify creates ONE order, *Partially paid*, $7,000 outstanding; sends its order confirmation.
+
+### Flow 6 — App picks up the order
+1. Shopify webhook `orders/create` → BG.
+2. BG detects our selling plan; saves total/paid/outstanding, mandate id, payment link.
+3. BG creates steps: Deposit $3,000 PAID · Balance $7,000 WAITING; tags `deposit-paid`, `balance-due`; note line; schedules DAYS_AFTER_ORDER trigger if set; increments Free-plan usage.
+4. P1 lists it under **Balance due**.
+
+### Flow 7 — Start the balance request (3 triggers)
+- **A. Staff button:** P1 → P2 → **Collect balance** → pop-up "Collect $7,000 from Restaurant ABC" · saved card •••• 4242 or payment link → Confirm.
+- **B. On shipping:** staff mark the order fulfilled in Shopify → webhook → BG uses the default method from P5.
+- **C. Days after order:** scheduled BG job.
+
+BG first re-syncs the order (already paid → stop) and locks the step (double click → no-op), then continues with Flow 8 or 9.
+
+### Flow 8 — Collect by saved card
+1. BG creates a PaymentAttempt with a unique idempotency key and calls `orderCreateMandatePayment` for $7,000.
+2. BG polls `orderPaymentStatus` every 15 s.
+3. Success → same order *Paid*; step PAID; tags `deposit-fully-paid`; note line; reminders cancelled; buyer email "Payment received"; P2 toast "Balance paid".
+4. Failure → Flow 12.
+
+### Flow 9 — Collect by payment link
+1. BG reads `additionalPaymentCollectionUrl`, emails buyer "Your order is ready — $7,000 due" with **Pay now**.
+2. Step REQUESTED; due date = today + grace days (P5); reminders scheduled (Flow 11).
+3. Buyer pays on Shopify's payment page → same order *Paid*.
+4. Webhook → BG: step PAID, tags/note updated, reminders cancelled, "Fully paid" email; P1 moves it to **Paid**.
+
+### Flow 10 — Record a bank transfer
+1. Buyer wires money.
+2. P2 → **Record payment**: amount, method, date, reference → Record.
+3. BG validates amount ≤ outstanding and calls `orderCreateManualPayment` on the same order.
+4. Full amount → *Paid*, reminders stop, "Fully paid" email. Part amount → stays *Partially paid*, reminders continue.
+5. Activity log: "Sarah recorded $7,000 bank transfer".
+
+### Flow 11 — Reminders and overdue
+1. Days 3, 7, 14 after request (P5) → BG sends reminder with Pay now link (skipped if paid/cancelled).
+2. Due date passed and unpaid → daily BG check sets OVERDUE, tag `balance-overdue`, staff alert email.
+3. P1 Overdue tab; P2 red banner "Do not ship: $7,000 unpaid"; staff can resend link, charge again or record payment.
+
+### Flow 12 — Failed card payment
+1. Charge fails → step FAILED, order PAYMENT_FAILED.
+2. Buyer email "Action needed" with payment link; staff alert "Card charge failed".
+3. P2 shows the error; staff retry or record payment; buyer paying by link continues as Flow 9 steps 3–4.
+
+### Flow 13 — Order changes
+| Change | Where | BG result |
+|---|---|---|
+| Edited (20 → 25 tables) | Shopify admin | Re-sync: total $12,500, owed $9,500, step amount updated |
+| Discount after deposit | Shopify admin | Owed updated |
+| Refund | Shopify admin | Paid updated |
+| Cancelled | Shopify admin | CANCELLED, steps cancelled, reminders stopped |
+| Cancel balance | P2 | Requests and reminders stop; Shopify order unchanged |
+
+### Flow 14 — Settings and email templates
+1. P5: logo, reply-to, staff alert email, default method, grace days, reminder days, default policy → Save (BG updates policy metafield for E1).
+2. P5 → P6: choose an email, edit subject/body with placeholders, preview, send test, save or reset.
+
+### Flow 15 — App billing (Free → Pro)
+1. P1 banner "7 of 10 free deposit orders used this month".
+2. 11th order: deposit still taken in Shopify; app marks it **untracked** (greyed, no actions/reminders).
+3. P7 → **Upgrade to Pro ($29/month)** → Shopify approval page (test charge on dev stores).
+4. `app_subscriptions/update` → plan PRO; **untracked orders of the current period become tracked** (re-sync, reminders scheduled if requested).
+5. Monthly BG job resets Free usage.
+
+### Flow 16 — Uninstall and privacy
+| Event | BG result |
+|---|---|
+| Uninstall | Stop jobs; purge shop data after 48 h (cancelled on reinstall). The app loses API access at uninstall, so it cannot delete its selling plans then — ⚠ verify whether Shopify removes app-created selling plan groups automatically (feasibility guide). |
+| `customers/data_request` | Export that customer's records to the shop owner |
+| `customers/redact` | Anonymise name/email |
+| `shop/redact` | Delete all shop data |
+
+### Flow → page map
+| Part | Flows |
+|---|---|
+| P1 Dashboard | 1, 4, 6, 7, 9, 11, 15 |
+| P2 Order detail | 7, 8, 10, 11, 12, 13 |
+| P3 Rules / P4 Create-edit rule | 2, 3 |
+| P5 Settings | 7, 9, 11, 14 |
+| P6 Email templates | 14 |
+| P7 Plan & billing | 15 |
+| E1 Theme extension | 4, 5 |
+| E2 Validation Function | 2 (minimums saved), 5 (checkout blocked) |
+| BG | all |
 
 ---
 
@@ -189,6 +331,18 @@ Run on **two development stores**: one non-Plus, one Plus. Use Shopify Payments 
 - S3 fails on non-Plus → v1 uses **payment link only** on non-Plus (`ShopSettings.features.savedCardCharge = false`).
 - S5 fails → payment link uses Shopify's `orderInvoiceSend` email instead of the app's own email link.
 - S1 fails → **stop and re-plan** (core assumption broken).
+
+**Results so far (non-Plus dev store, Bogus Gateway, 2026-11-03)**
+
+| Test | Result |
+|---|---|
+| T1 / S1 setup — `sellingPlanGroupCreate` (30%, `TIME_AFTER_CHECKOUT`, `P90D`, `PRE_ORDER`) | ✅ Pass, product attached |
+| T10 — Dawn shows the deposit option | ⚠ Storefront exposes `selling_plan_groups`, but Dawn renders **no picker** → E1 must render its own selector |
+| T2 / S1 — deposit checkout | ✅ ONE order `PARTIALLY_PAID`, received 3,000, outstanding 7,000, line item carries the selling plan |
+| T3 / S2 — vaulted card | ✅ `PaymentMandate` present |
+| S5 prerequisite — balance link | ✅ `additionalPaymentCollectionUrl` present (payment not yet tested) |
+| Scopes | `paymentTerms` needs **`read_payment_terms`** (added to Appendix B) |
+| Pending | T4 (whole-balance charge), T5, T6, T7, T8, T9, T11, uninstall behaviour of selling plans; all on Plus store |
 
 ### 0.5 Tests
 - Unit: `money.server.ts` rounding (30% of $10,000.01 = $3,000.00 → balance $7,000.01), currency formatting.
@@ -528,9 +682,10 @@ Theme app block **"Deposit details"** (product section), shown only when the pro
 ⓘ Deposit is non-refundable once production starts.   [policy text]
 ```
 
-- The selling-plan picker itself is rendered by the theme (Dawn and OS 2.0 themes support it). The block adds the **today/later amounts** and **policy** and updates when the variant, quantity or plan changes.
-- Block settings (theme editor): show policy (on/off), text colour, "Show only when deposit option is selected" (on/off).
-- **Fallback picker:** if the theme renders no selling-plan picker, block setting "Render deposit selector" adds radio buttons that set the hidden `selling_plan` input in the product form.
+- **The block renders its own deposit selector** (radio buttons "Pay in full" / "Pay X% deposit"). Feasibility test T10 showed Dawn exposes the selling plan in `product.selling_plan_groups` but renders **no picker**, so the selector is required, not a fallback.
+- The selector writes the chosen plan into a hidden `<input name="selling_plan">` inside the theme's product form (created if missing; cleared for "Pay in full"), so the theme's own Add to cart sends `selling_plan` to `/cart/add`.
+- The block shows the **today/later amounts** and **policy**, updating when the variant, quantity or choice changes.
+- Block settings (theme editor): default choice (Pay in full / Deposit), show policy (on/off), text colour, "Hide selector if the theme already shows purchase options" (on/off, for themes with a native picker, to avoid two selectors).
 
 ### 3.2 Database
 None. Policy text exposed through an **app-owned shop metafield** `$app:deposit.policy` (written by Module 1/7 on save) so Liquid can read it as `app.metafields.deposit.policy`.
@@ -543,7 +698,7 @@ None. Policy text exposed through an **app-owned shop metafield** `$app:deposit.
 | File | Content |
 |---|---|
 | `extensions/deposit-block/blocks/deposit-details.liquid` | Reads `product.selling_plan_groups`, `selling_plan.checkout_charge.value_type` / `.value`, `product.selected_or_first_available_variant.price`; renders amounts with `money` filter |
-| `extensions/deposit-block/assets/deposit-details.js` | Listens to variant/quantity/selling-plan changes (`change` on product form); recalculates amounts; no external requests |
+| `extensions/deposit-block/assets/deposit-details.js` | Renders/handles the selector; sets the hidden `selling_plan` input in the product form; listens to variant/quantity changes (`change` on product form); recalculates amounts; no external requests |
 | `extensions/deposit-block/assets/deposit-details.css` | Minimal styles inheriting theme fonts/colours |
 | `extensions/deposit-min-order/src/run.ts` | Validation Function |
 
@@ -553,6 +708,8 @@ None. Policy text exposed through an **app-owned shop metafield** `$app:deposit.
 | Unit | JS amount calculator: percentage, fixed per item, quantity changes |
 | Unit | Validation Function: below min → error; above → none; no deposit plan → none |
 | Manual | Dawn + 2 other OS 2.0 themes: block renders, amounts update with quantity, policy shows |
+| Manual | Choose deposit → Add to cart → cart line shows the plan name; choose Pay in full → no plan on the line |
+| Manual | Theme with a native picker + "Hide selector" on → only one selector visible |
 | Manual | Lighthouse: product page performance score drops ≤ 2 points with block enabled |
 | E2E (Playwright) | Buy product with deposit plan → checkout shows "Due today / Due later" amounts |
 
@@ -961,6 +1118,7 @@ enum AppPlan { FREE PRO }
 - Downgrade: `appSubscriptionCancel`.
 - Usage: increment `ordersThisPeriod` when Module 2 creates a DepositOrder; reset monthly (job `billing.resetUsage`, 1st of month UTC).
 - **Over limit on Free:** order is stored with flag `untracked = true` (add column), no reminders/actions; shown greyed with upgrade prompt. Deposits still work in Shopify (selling plans are not removed) so buyers are never blocked.
+- **On upgrade to Pro:** `app_subscriptions/update` (ACTIVE) → set `untracked = false` on the current period's orders, re-sync each (Module 2) and schedule any due triggers/reminders.
 
 ### 8.4 Frontend
 `app.billing.tsx`, `components/UsageBanner.tsx`.
@@ -971,6 +1129,7 @@ enum AppPlan { FREE PRO }
 | Unit | Usage window reset logic, limit check at exactly 10 / 11 |
 | Integration | Upgrade flow with mocked `appSubscriptionCreate`; webhook ACTIVE → PRO |
 | Integration | 11th order on Free → untracked, no reminder jobs |
+| Integration | Upgrade to Pro → untracked orders become tracked and re-synced |
 | Manual | Dev store test charge approve/decline |
 
 ### 8.6 Done criteria
@@ -1325,6 +1484,7 @@ enum ActorType { STAFF SYSTEM WEBHOOK }
 | `read_products` | Resource picker, collection expansion |
 | `read_purchase_options`, `write_purchase_options` | Selling plan groups |
 | `read_orders`, `write_orders` | Order sync, tags, note, manual payments |
+| `read_payment_terms` | `order.paymentTerms` (balance due date) — required, found in feasibility test T2 |
 | `read_customers` | Buyer name/email on orders |
 | `read_payment_mandate`, `write_payment_mandate` | Saved-card balance charge (may need Shopify approval) |
 | `read_fulfillments` | Fulfillment trigger |
