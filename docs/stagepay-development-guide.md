@@ -1,7 +1,7 @@
 # Stagepay — Development Guide
 
 **App:** Stagepay · **App Store listing:** *Stagepay: Milestone Payments*
-Version 1.0 · 2026-11-03
+Version 1.1 · 2026-11-03 · Matches spec v1.2 (reminders on the Dashboard; collection method and days before overdue per rule)
 
 This guide is the hands-on companion to **`docs/deposit-app-spec.md` (v1.1)**. The spec says **what** to build; this guide says **how**, step by step, in the agreed build order (0 → 13). Each step is built, tested and signed off before the next one starts.
 
@@ -16,15 +16,15 @@ This guide is the hands-on companion to **`docs/deposit-app-spec.md` (v1.1)**. T
 3. [Naming](#3-naming)
 4. [Project layout](#4-project-layout)
 5. [Step 0 — Foundations](#step-0--foundations-14-h)
-6. [Step 1 — Deposit rules (P3, P4)](#step-1--deposit-rules-p3-p4-19-h)
+6. [Step 1 — Deposit rules (P3, P4)](#step-1--deposit-rules-p3-p4-20-h)
 7. [Step 2 — Theme app extension (E1)](#step-2--theme-app-extension-e1-13-h)
 8. [Step 3 — Order sync & status engine](#step-3--order-sync--status-engine-20-h)
 9. [Step 4 — Dashboard, simple (P1 part)](#step-4--dashboard-simple-p1-part-5-h)
 10. [Step 5 — Order detail & balance collection (P2)](#step-5--order-detail--balance-collection-p2-28-h)
 11. [Step 6 — Emails & reminders](#step-6--emails--reminders-13-h)
-12. [Step 7 — Settings (P5)](#step-7--settings-p5-5-h)
+12. [Step 7 — Settings (P5)](#step-7--settings-p5-3-h)
 13. [Step 8 — Email templates editor (P6)](#step-8--email-templates-editor-p6-3-h)
-14. [Step 9 — Dashboard, full (P1 finish)](#step-9--dashboard-full-p1-finish-6-h)
+14. [Step 9 — Dashboard, full (P1 finish)](#step-9--dashboard-full-p1-finish-7-h)
 15. [Step 10 — Plan & billing (P7)](#step-10--plan--billing-p7-5-h)
 16. [Step 11 — Checkout validation Function (E2)](#step-11--checkout-validation-function-e2-4-h)
 17. [Step 12 — Privacy, uninstall, activity log](#step-12--privacy-uninstall-activity-log-7-h)
@@ -45,15 +45,15 @@ This guide is the hands-on companion to **`docs/deposit-app-spec.md` (v1.1)**. T
 | Step | Build | Hours | Milestone after this step |
 |---|---|---|---|
 | 0 | Foundations | 14 | |
-| 1 | Deposit rules P3 + P4 | 19 | |
+| 1 | Deposit rules P3 + P4 | 20 | |
 | 2 | Theme extension E1 | 13 | **Buyers can pay a deposit** |
 | 3 | Order sync & status engine | 20 | |
 | 4 | Dashboard (simple) | 5 | |
 | 5 | Order detail + collection P2 | 28 | **Works end to end (demo)** |
 | 6 | Emails & reminders | 13 | **No manual chasing** |
-| 7 | Settings P5 | 5 | |
+| 7 | Settings P5 | 3 | |
 | 8 | Email templates P6 | 3 | |
-| 9 | Dashboard (full) | 6 | |
+| 9 | Dashboard (full) + Reminders panel | 7 | |
 | 10 | Plan & billing P7 | 5 | **Ready to sell** |
 | 11 | Validation Function E2 | 4 | |
 | 12 | Privacy, uninstall, activity log | 7 | |
@@ -392,7 +392,7 @@ Install on `stagepay-dev-basic` → `Shop` row exists with correct plan; trigger
 
 ---
 
-## Step 1 — Deposit rules (P3, P4) (19 h)
+## Step 1 — Deposit rules (P3, P4) (20 h)
 
 **Goal:** merchants create rules; each active rule becomes a Shopify selling plan on the chosen products.
 **Spec:** Module 1 (FR-1…FR-6). **Builds:** P3 Rules list, P4 Create/edit rule.
@@ -419,6 +419,8 @@ export const RuleInput = z.object({
   balanceTrigger: z.enum(["MANUAL", "ON_FULFILLMENT", "DAYS_AFTER_ORDER"]),
   balanceTriggerDays: z.coerce.number().int().min(1).max(365).optional().nullable(),
   finalDueDays: z.coerce.number().int().min(1).max(365).default(90),
+  collectionMethod: z.enum(["SAVED_CARD", "PAYMENT_LINK"]).default("SAVED_CARD"),
+  overdueDays: z.coerce.number().int().min(1).max(60).default(7),
   buyerLabel: z.string().trim().min(1).max(80),
   policyText: z.string().max(500).optional().nullable(),
   targets: z.array(z.object({
@@ -495,7 +497,7 @@ Set `syncStatus = SYNCED` or `FAILED` + `syncError`. After every sync, rewrite t
 - Action intents: `toggle`, `retry-sync` → update + `enqueue("rules.sync")`.
 
 **1.6 P4 Create/edit rule** (`app.rules.$id.tsx`, `$id = "new"` for create)
-- Fields per spec Module 1 design; resource picker:
+- Fields per spec Module 1 design, including **How to collect the balance** (saved card / payment link — card disabled with a tooltip if the plan can't charge saved cards, see Step 7) and **Days before overdue** (default 7); resource picker:
 
 ```ts
 const selected = await shopify.resourcePicker({ type: "product", multiple: true });
@@ -515,6 +517,7 @@ const selected = await shopify.resourcePicker({ type: "product", multiple: true 
 | Overlap: product in collection of another active rule → error | Integration |
 | Save → job → `sellingPlanGroupCreate` called with expected variables (msw) | Integration |
 | Toggle off → `sellingPlanGroupDelete`; edit targets → add/remove diff | Integration |
+| `collectionMethod` / `overdueDays` saved and validated (1–60) | Unit |
 | Shopify `userErrors` → `FAILED` + message shown | Integration |
 
 ### Manual check
@@ -769,7 +772,7 @@ export function computeStatus(o: {
 
 **3.5 `syncOrder(shopId, orderGid)`** (job `orders.sync`)
 1. Load order (3.3). If no line item has a Stagepay `sellingPlanId` → ignore.
-2. **First time:** create `DepositOrder` + steps — Step 1 *Deposit* = received, `PAID`; Step 2 *Balance* = outstanding, `WAITING`, trigger from the rule. If trigger `DAYS_AFTER_ORDER` → `enqueue("balance.request", …, { startAfter })` (Step 5 adds the handler). Increment usage (Step 10 adds the counter).
+2. **First time:** create `DepositOrder` (copy `collectionMethod` and `overdueDays` from the rule — later rule edits must not change existing orders) + steps — Step 1 *Deposit* = received, `PAID`; Step 2 *Balance* = outstanding, `WAITING`, trigger from the rule. If trigger `DAYS_AFTER_ORDER` → `enqueue("balance.request", …, { startAfter })` (Step 5 adds the handler). Increment usage (Step 10 adds the counter).
 3. **Every time:** overwrite total/paid/outstanding from Shopify; step 2 amount = outstanding while not paid; match new successful `SALE`/`CAPTURE` transactions to the lowest unpaid step; set `fulfilledAt`; compute status.
 4. If topic is fulfillment and trigger is `ON_FULFILLMENT` and step 2 `WAITING` → `enqueue("balance.request", { reason: "fulfillment" })`.
 5. **Write back to Shopify only when changed:**
@@ -864,7 +867,7 @@ export async function requestBalance(id: string, method: CollectionMethod, actor
   if (useCard) await enqueue("balance.charge", { stepId: step.id });
   else await sendPaymentLink(step.id);
 
-  await markRequested(step.id);    // REQUESTED, requestedAt, balanceDueAt = now + graceDays
+  await markRequested(step.id);    // REQUESTED, requestedAt, balanceDueAt = now + order.overdueDays
   // Step 6: scheduleReminders(step.id)
   // Step 12: audit("balance.requested", …)
 }
@@ -921,7 +924,7 @@ Validate `0 < amount ≤ outstanding`; attempt `MANUAL_RECORD` → `SUCCEEDED` �
 - `MANUAL` → P2 button,
 - `ON_FULFILLMENT` → enqueued by Step 3,
 - `DAYS_AFTER_ORDER` → delayed job from Step 3.
-For automatic triggers use the shop's default method (hard-coded `SAVED_CARD` until Step 7).
+For every trigger the method comes from the order (`order.collectionMethod`, copied from its rule). The P2 pop-up pre-selects it; staff may switch.
 
 **5.9 Pop-ups** — `CollectBalanceModal` (method radio: saved card / payment link; amount read-only), `RecordPaymentModal` (amount, method select, date, reference). Toasts: "Charge started", "Balance paid", "Charge failed".
 
@@ -995,7 +998,7 @@ export async function sendRaw(m: { from: string; to: string; replyTo?: string;
 | Order becomes OVERDUE (3.6) | `STAFF_OVERDUE` |
 
 **6.6 Reminders** (`reminders.server.ts`)
-- `scheduleReminders(stepId)`: for each day in `[3, 7, 14]` (Step 7 makes it configurable) create `Reminder` + `enqueue("reminders.send", { reminderId }, { startAfter: seconds(day) })`. With `TIME_COMPRESSION=1440`, 1 day = 60 s.
+- `scheduleReminders(stepId)`: return early if `settings.remindersEnabled` is false; for each day in `settings.reminderDays` (default `[3, 7, 14]`, edited on P1 in Step 9) create `Reminder` + `enqueue("reminders.send", { reminderId }, { startAfter: seconds(day) })`. With `TIME_COMPRESSION=1440`, 1 day = 60 s.
 - Job `reminders.send`: skip if step `PAID`/`CANCELLED` or reminder cancelled → send `REMINDER`.
 - `cancelReminders(stepId)` when paid, cancelled or balance cancelled.
 
@@ -1020,9 +1023,9 @@ export async function sendRaw(m: { from: string; to: string; replyTo?: string;
 
 ---
 
-## Step 7 — Settings (P5) (5 h)
+## Step 7 — Settings (P5) (3 h)
 
-**Goal:** merchants change branding, emails, default collection method, grace and reminder days, default policy; features follow the Shopify plan.
+**Goal:** merchants change branding, email addresses and default policy; features follow the Shopify plan. (Reminders are on P1 — Step 9; collection method and days before overdue are per rule — Step 1.)
 **Spec:** Module 7. **Builds:** P5.
 
 ### Tasks
@@ -1030,11 +1033,11 @@ export async function sendRaw(m: { from: string; to: string; replyTo?: string;
    ```bash
    npx prisma migrate dev --name step7_settings
    ```
-2. **Validation** (zod): emails valid; reminder days 1–60, ascending, max 5; grace 1–60.
-3. **P5 page** sections: Branding (logo upload, colour) · Emails (reply-to, staff alert emails, link to P6) · Balance collection (default method, grace days) · Reminders (on/off, days) · Policy (default text).
+2. **Validation** (zod): emails valid.
+3. **P5 page** sections: Branding (logo upload, colour) · Emails (reply-to, staff alert emails, link to P6) · Policy (default text).
 4. **Logo upload** — `stagedUploadsCreate` → upload → `fileCreate` → store the file URL.
 5. **On save** — update settings; `setAppMetafield("policy", …)` (E1 reads it).
-6. **Replace hard-coded values** from Steps 5–6: default method, grace days, reminder days, reply-to, logo.
+6. **Replace hard-coded values** from Step 6: reply-to, staff alert emails, logo.
 7. **Plan detection** (`plan.server.ts`) — on install and `shop/update` webhook refresh `planName/isPlus`; compute `features` from plan + feasibility results:
    ```ts
    export function featuresFor(shop: Shop) {
@@ -1049,12 +1052,12 @@ export async function sendRaw(m: { from: string; to: string; replyTo?: string;
 ### Tests
 | Test | Type |
 |---|---|
-| Validation errors (bad email, days not ascending, > 5 reminders) | Unit |
+| Validation errors (bad email) | Unit |
 | Install → defaults created | Integration |
 | `shop/update` Grow → Plus → features updated | Integration |
 
 ### Done
-- [ ] Settings persist and change email, reminder and collection behaviour
+- [ ] Settings persist and change email sender, alerts and branding
 - [ ] Plan-gated features hidden or explained
 
 ---
@@ -1081,9 +1084,9 @@ export async function sendRaw(m: { from: string; to: string; replyTo?: string;
 
 ---
 
-## Step 9 — Dashboard, full (P1 finish) (6 h)
+## Step 9 — Dashboard, full (P1 finish) (7 h)
 
-**Goal:** totals at a glance and a setup checklist for new merchants.
+**Goal:** totals at a glance, reminder controls, and a setup checklist for new merchants.
 **Spec:** Module 6 + 7 (onboarding). **Builds:** P1 completed.
 
 ### Tasks
@@ -1098,7 +1101,12 @@ export async function sendRaw(m: { from: string; to: string; replyTo?: string;
    "Paid this month" = sum of step 2 attempts `SUCCEEDED` with `completedAt` in the current month (shop timezone).
 2. **Cards:** Deposits held · Balances owed · Overdue · Paid this month.
 3. **Indexes** for search: `pg_trgm` GIN indexes on `orderName`, `customerName`, `customerEmail` (raw SQL migration).
-4. **Setup checklist** (stored in `ShopSettings.onboardingDone`): ① Create a rule ② Add block — deep link
+4. **Reminders panel** on P1: "Automatic reminders" On/Off switch + reminder days as chips (default 3, 7, 14) + **Save**.
+   - Action `intent=save-reminders`: validate (zod: days 1–60, ascending, max 5) → save `remindersEnabled`, `reminderDays` in `ShopSettings`.
+   - Turned **off** → `cancelReminders` for every pending reminder of the shop.
+   - Turned **on** or days changed → for steps in `REQUESTED`, cancel old pending reminders and `scheduleReminders` again (only future dates).
+   - Help text: "Sent to buyers after a balance is requested, until it's paid."
+5. **Setup checklist** (stored in `ShopSettings.onboardingDone`): ① Create a rule ② Add block — deep link
    `https://{shop}/admin/themes/current/editor?template=product&addAppBlockId={SHOPIFY_API_KEY}/stagepay-deposit&target=mainSection`
    ③ Place a test order (shows test card numbers) ④ Collect a test balance. Auto-tick ① and ③/④ from data; ② when the merchant clicks. Dismissible.
 
@@ -1106,10 +1114,12 @@ export async function sendRaw(m: { from: string; to: string; replyTo?: string;
 | Test | Type |
 |---|---|
 | Summary numbers on seeded mixed data | Integration |
+| Reminders off → pending reminders cancelled; on → rescheduled; bad days rejected | Integration |
 | 5,000 seeded orders → loader < 300 ms | Perf (CI) |
 
 ### Done
 - [ ] Totals match Shopify orders on the dev store
+- [ ] Reminders panel turns reminders on/off and changes days
 - [ ] Checklist guides a new merchant to the first collected balance
 
 ---

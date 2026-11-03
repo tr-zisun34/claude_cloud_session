@@ -1,6 +1,8 @@
 # Stagepay (Deposit & Balance App) — Build Specification
 
-Version 1.1 · 2026-11-03 · Source documents: *Deposit & Balance App – Requirements* (merchant brief), *Deposit_App_Estimate.xlsx*, *Build_Order_Estimate.xlsx*, *docs/feasibility-test-guide.md*
+Version 1.2 · 2026-11-03 · Source documents: *Deposit & Balance App – Requirements* (merchant brief), *Deposit_App_Estimate.xlsx*, *Build_Order_Estimate.xlsx*, *docs/feasibility-test-guide.md*
+
+**Changes in 1.2:** reminder on/off and days moved from Settings to the Dashboard (P1 "Reminders" panel); collection method and days-before-overdue moved from Settings into each rule (P4) and copied onto each order when it is placed.
 
 **Changes in 1.1:** user flows added (section 5); build order and hours aligned with *Build_Order_Estimate.xlsx*; theme block now always renders its own deposit selector (Dawn shows none — feasibility test T10); `read_payment_terms` scope added; feasibility results T1–T3 recorded; untracked Free-plan orders become tracked after upgrade.
 
@@ -112,15 +114,15 @@ Build in the order money flows: rule → product page → order → collect bala
 | Step | Build | Pages / extensions | Spec module | Est. hours* |
 |---|---|---|---|---|
 | 0 | Foundations: shop record, Shopify client, jobs, webhook receiver | — | 0 | 14 |
-| 1 | Deposit rules list + create/edit rule, selling plan sync | P3, P4 | 1 | 19 |
+| 1 | Deposit rules list + create/edit rule (incl. collection method, days before overdue), selling plan sync | P3, P4 | 1 | 20 |
 | 2 | Theme app extension: own deposit selector + amounts + policy | E1 | 3 | 13 |
 | 3 | Order sync & status engine | — | 2 | 20 |
 | 4 | Dashboard, simple version (orders list) | P1 (part) | 6 | 5 |
 | 5 | Order detail + Collect balance / Record payment | P2 | 4, 6 | 28 |
 | 6 | Emails with default wording + reminders | — | 5 | 13 |
-| 7 | Settings + plan detection | P5 | 7 | 5 |
+| 7 | Settings (branding, emails, policy) + plan detection | P5 | 7 | 3 |
 | 8 | Email templates editor | P6 | 5 | 3 |
-| 9 | Dashboard, full version: totals, tabs, setup checklist | P1 (finish) | 6, 7 | 6 |
+| 9 | Dashboard, full version: totals, Reminders panel, setup checklist | P1 (finish) | 5, 6, 7 | 7 |
 | 10 | Plan & billing + usage limit | P7 | 8 | 5 |
 | 11 | Checkout validation Function (minimum order value) | E2 | 3 | 4 |
 | 12 | Privacy webhooks, uninstall cleanup, activity log | P2 section | 9 | 7 |
@@ -159,7 +161,7 @@ Each step names who acts and where (page, extension, BG = background, Shopify = 
 
 ### Flow 2 — Create a deposit rule
 1. P3 → **Create rule**.
-2. P4: name, 30%, products/collection, minimum order $5,000, balance trigger, buyer label, policy; live preview "$10,000 → $3,000 today, $7,000 later".
+2. P4: name, 30%, products/collection, minimum order $5,000, balance trigger, **collection method (saved card / payment link)**, **days before overdue (7)**, buyer label, policy; live preview "$10,000 → $3,000 today, $7,000 later".
 3. P4 validates (targets, 1–99%, no product in two active rules) → **Save**.
 4. BG creates the selling plan group in Shopify and attaches products; writes policy metafield (for E1) and minimums metafield (for E2).
 5. P3 shows **Active · Synced** (or **Sync failed · Retry**).
@@ -182,12 +184,13 @@ Each step names who acts and where (page, extension, BG = background, Shopify = 
 ### Flow 6 — App picks up the order
 1. Shopify webhook `orders/create` → BG.
 2. BG detects our selling plan; saves total/paid/outstanding, mandate id, payment link.
-3. BG creates steps: Deposit $3,000 PAID · Balance $7,000 WAITING; tags `deposit-paid`, `balance-due`; note line; schedules DAYS_AFTER_ORDER trigger if set; increments Free-plan usage.
-4. P1 lists it under **Balance due**.
+3. BG copies the rule's collection method and days before overdue onto the order (later rule edits don't change it).
+4. BG creates steps: Deposit $3,000 PAID · Balance $7,000 WAITING; tags `deposit-paid`, `balance-due`; note line; schedules DAYS_AFTER_ORDER trigger if set; increments Free-plan usage.
+5. P1 lists it under **Balance due**.
 
 ### Flow 7 — Start the balance request (3 triggers)
-- **A. Staff button:** P1 → P2 → **Collect balance** → pop-up "Collect $7,000 from Restaurant ABC" · saved card •••• 4242 or payment link → Confirm.
-- **B. On shipping:** staff mark the order fulfilled in Shopify → webhook → BG uses the default method from P5.
+- **A. Staff button:** P1 → P2 → **Collect balance** → pop-up "Collect $7,000 from Restaurant ABC" · method pre-selected from the rule (saved card •••• 4242 or payment link), staff may switch → Confirm.
+- **B. On shipping:** staff mark the order fulfilled in Shopify → webhook → BG uses the order's collection method (from its rule).
 - **C. Days after order:** scheduled BG job.
 
 BG first re-syncs the order (already paid → stop) and locks the step (double click → no-op), then continues with Flow 8 or 9.
@@ -200,7 +203,7 @@ BG first re-syncs the order (already paid → stop) and locks the step (double c
 
 ### Flow 9 — Collect by payment link
 1. BG reads `additionalPaymentCollectionUrl`, emails buyer "Your order is ready — $7,000 due" with **Pay now**.
-2. Step REQUESTED; due date = today + grace days (P5); reminders scheduled (Flow 11).
+2. Step REQUESTED; due date = today + the order's days before overdue (from its rule); reminders scheduled (Flow 11).
 3. Buyer pays on Shopify's payment page → same order *Paid*.
 4. Webhook → BG: step PAID, tags/note updated, reminders cancelled, "Fully paid" email; P1 moves it to **Paid**.
 
@@ -212,7 +215,7 @@ BG first re-syncs the order (already paid → stop) and locks the step (double c
 5. Activity log: "Sarah recorded $7,000 bank transfer".
 
 ### Flow 11 — Reminders and overdue
-1. Days 3, 7, 14 after request (P5) → BG sends reminder with Pay now link (skipped if paid/cancelled).
+1. Days 3, 7, 14 after request (set in the P1 **Reminders** panel; skipped entirely if reminders are off) → BG sends reminder with Pay now link (skipped if paid/cancelled).
 2. Due date passed and unpaid → daily BG check sets OVERDUE, tag `balance-overdue`, staff alert email.
 3. P1 Overdue tab; P2 red banner "Do not ship: $7,000 unpaid"; staff can resend link, charge again or record payment.
 
@@ -231,7 +234,8 @@ BG first re-syncs the order (already paid → stop) and locks the step (double c
 | Cancel balance | P2 | Requests and reminders stop; Shopify order unchanged |
 
 ### Flow 14 — Settings and email templates
-1. P5: logo, reply-to, staff alert email, default method, grace days, reminder days, default policy → Save (BG updates policy metafield for E1).
+1. P5: logo, reply-to, staff alert email, default policy → Save (BG updates policy metafield for E1).
+   Reminders are changed on P1 (Reminders panel); collection method and days before overdue are set per rule on P4.
 2. P5 → P6: choose an email, edit subject/body with placeholders, preview, send test, save or reset.
 
 ### Flow 15 — App billing (Free → Pro)
@@ -252,10 +256,10 @@ BG first re-syncs the order (already paid → stop) and locks the step (double c
 ### Flow → page map
 | Part | Flows |
 |---|---|
-| P1 Dashboard | 1, 4, 6, 7, 9, 11, 15 |
+| P1 Dashboard (incl. Reminders panel) | 1, 4, 6, 7, 9, 11, 15 |
 | P2 Order detail | 7, 8, 10, 11, 12, 13 |
-| P3 Rules / P4 Create-edit rule | 2, 3 |
-| P5 Settings | 7, 9, 11, 14 |
+| P3 Rules / P4 Create-edit rule | 2, 3, 7, 9 (method and overdue days) |
+| P5 Settings | 14 |
 | P6 Email templates | 14 |
 | P7 Plan & billing | 15 |
 | E1 Theme extension | 4, 5 |
@@ -382,6 +386,8 @@ Merchants create deposit rules; the app mirrors each active rule as a Shopify **
 | Minimum order value | money (optional) | ≥ 0 |
 | Balance due | select: *When staff request it* / *When the order is shipped* / *X days after order* | X: 1–365 |
 | Final due date (days after order) | number | 1–365, default 90. Used as the Shopify payment-terms due date. |
+| How to collect the balance | radio: *Charge saved card* / *Email payment link* | required, default *Charge saved card*; card option disabled with tooltip if the store's plan can't charge saved cards |
+| Days before overdue | number | 1–60, default 7. Counted from the day the balance is requested. |
 | Label shown to buyers | text | default "Pay {deposit} deposit now, rest later"; ≤ 80 chars |
 | Deposit policy | textarea | ≤ 500 chars |
 | Preview box | read-only | "On a $10,000 order: $3,000 today, $7,000 later" (live) |
@@ -403,6 +409,8 @@ model DepositRule {
   balanceTrigger       StepTrigger          // MANUAL | ON_FULFILLMENT | DAYS_AFTER_ORDER
   balanceTriggerDays   Int?
   finalDueDays         Int      @default(90)
+  collectionMethod     CollectionMethod @default(SAVED_CARD)   // SAVED_CARD | PAYMENT_LINK
+  overdueDays          Int      @default(7)
   buyerLabel           String
   policyText           String?
   active               Boolean  @default(true)
@@ -506,6 +514,7 @@ Notes:
 | Unit | Overlap detection product-in-collection vs product |
 | Integration | Save rule → job → `sellingPlanGroupCreate` called with expected variables (GraphQL mock) |
 | Integration | Toggle off → `sellingPlanGroupDelete`; edit targets → add/remove products diff |
+| Integration | Edit rule method/overdue days → existing orders keep their copied values; new orders use the new ones |
 | Integration | Shopify `userErrors` → `syncStatus = FAILED`, message shown |
 | Manual (dev store) | Product page shows "Pay 30% deposit" option after save |
 
@@ -560,9 +569,11 @@ model DepositOrder {
   paidAmount         Decimal  @db.Decimal(12,2)   // totalReceivedSet - refunds
   outstandingAmount  Decimal  @db.Decimal(12,2)   // totalOutstandingSet
   status             DepositOrderStatus
-  balanceDueAt       DateTime?            // when requested + grace, or finalDue
+  balanceDueAt       DateTime?            // requestedAt + overdueDays
   finalDueAt         DateTime             // from payment terms / rule.finalDueDays
   mandateGid         String?              // vaulted payment method id
+  collectionMethod   CollectionMethod     // copied from rule at creation
+  overdueDays        Int                  // copied from rule at creation
   paymentLinkUrl     String?
   fulfilledAt        DateTime?
   cancelledAt        DateTime?
@@ -770,7 +781,7 @@ enum AttemptStatus { PENDING SUCCEEDED FAILED }
 1. Lock row (`SELECT … FOR UPDATE`); if step not in WAITING/FAILED/OVERDUE → no-op (prevents double click, FR edge case).
 2. Re-sync order (Module 2) to get current outstanding; if 0 → mark PAID, stop.
 3. `method = SAVED_CARD` and mandate available and feature enabled → `chargeSavedCard`; else → `sendPaymentLink`.
-4. Step → REQUESTED, `requestedAt = now`, `balanceDueAt = now + settings.balanceGraceDays` (default 7); schedule reminders (Module 5).
+4. Step → REQUESTED, `requestedAt = now`, `balanceDueAt = now + order.overdueDays` (copied from the rule); schedule reminders (Module 5) unless reminders are off.
 
 `chargeSavedCard(step)` — job `balance.charge`
 ```graphql
@@ -813,7 +824,8 @@ mutation Manual($id: ID!, $amount: MoneyInput!, $name: String, $at: DateTime) {
 | Trigger | Source |
 |---|---|
 | MANUAL | Staff button |
-| ON_FULFILLMENT | `fulfillments/create` webhook (Module 2) → `balance.request` with `settings.defaultMethod` |
+| ON_FULFILLMENT | `fulfillments/create` webhook (Module 2) → `balance.request` with `order.collectionMethod` |
+| DAYS_AFTER_ORDER (method) | Uses `order.collectionMethod` |
 | DAYS_AFTER_ORDER | Scheduled job created at order creation (Module 2) |
 
 **Routes**
@@ -920,7 +932,7 @@ enum EmailStatus { QUEUED SENT DELIVERED BOUNCED FAILED }
 |---|---|
 | `email-provider.server.ts` | Interface `send({from, replyTo, to, subject, html, text, tag})`; Postmark implementation; test mode writes to log/Mailtrap |
 | `email.server.ts` | `sendEmail(shopId, key, depositOrderId)`: load template (or default), render placeholders (escape HTML), insert EmailLog QUEUED → send → SENT/FAILED |
-| `reminders.server.ts` | `scheduleReminders(step)` creates Reminder rows for each `settings.reminderDays` and pg-boss jobs `reminders.send` at `sendAt`; `cancelReminders(step)` sets `cancelledAt` and cancels jobs |
+| `reminders.server.ts` | `scheduleReminders(step)` returns early if `settings.remindersEnabled = false`; otherwise creates Reminder rows for each `settings.reminderDays` (edited on P1) and pg-boss jobs `reminders.send` at `sendAt`; `cancelReminders(step)` sets `cancelledAt` and cancels jobs |
 | Job `reminders.send` | Skip if step PAID/CANCELLED or reminder cancelled; else send `REMINDER` |
 | Webhook `/webhooks/postmark` | Delivery/bounce events → update EmailLog status (verify basic-auth secret) |
 
@@ -964,6 +976,7 @@ One place to see all deposit orders, money held and owed, and act on each order.
 | Tabs | All · Balance due · Requested · Overdue · Payment failed · Paid · Cancelled (with counts) |
 | Table | Order · Customer · Total · Paid · Owed · Status badge · Balance due by · Last action |
 | Search | Order name or customer name/email |
+| **Reminders panel** | Card at the side/bottom: "Automatic reminders" switch (On/Off) · reminder days as chips (default 3, 7, 14; 1–60, ascending, max 5) · **Save**. Text: "Sent to buyers after a balance is requested, until it's paid." Turning off cancels all pending reminders; turning on schedules them for orders already in *Balance requested* |
 | Paging | 50 per page, cursor based, sort by created (default) / owed / due date |
 | Empty state | "No deposit orders yet" + link to rules + "Place a test order" guide |
 
@@ -986,7 +999,7 @@ No new tables. Add indexes: `DepositOrder(shopId, createdAt)`, `DepositOrder(sho
 ### 6.3 Backend
 | Route | Loader |
 |---|---|
-| `/app` | `getSummary(shopId)` (one aggregate query) + `listOrders(shopId, {tab, q, cursor, sort})` |
+| `/app` | `getSummary(shopId)` (one aggregate query) + `listOrders(shopId, {tab, q, cursor, sort})` + reminder settings; POST `intent=save-reminders` → validate, save to `ShopSettings`, cancel or schedule pending reminders |
 | `/app/orders/:id` | `getOrderDetail(shopId, id)` (order + steps + attempts + emails + audit); POST `intent=refresh` → `syncOrder` |
 
 Performance target: dashboard loader < 300 ms at 5,000 orders (indexes above; summary via single `SUM … FILTER (WHERE …)` query).
@@ -1005,6 +1018,7 @@ Performance target: dashboard loader < 300 ms at 5,000 orders (indexes above; su
 | Unit | Summary aggregation against seeded data (mixed statuses, currencies = shop currency) |
 | Integration | Tab filters return correct rows; search by partial name; cursor paging stable |
 | Integration | Shop A cannot load Shop B order id (404) |
+| Integration | Reminders panel: turn off → pending reminders cancelled; turn on → scheduled for *Balance requested* orders; invalid days rejected |
 | E2E | Seed 3 orders → dashboard counts → open detail → Collect balance → status updates |
 | Perf | Seed 5,000 orders → loader < 300 ms (CI benchmark) |
 
@@ -1021,13 +1035,11 @@ Store-level configuration, first-run guide, and hiding features the store's Shop
 
 ### 7.1 Design
 
-**Settings** — `/app/settings`
+**Settings** — `/app/settings` (reminders now live on P1; collection method and days before overdue on each rule)
 | Section | Fields |
 |---|---|
 | Branding | Logo upload (PNG/JPG ≤ 1 MB, stored via Shopify Files `stagedUploadsCreate` + `fileCreate`), brand colour |
 | Emails | Reply-to email (default shop email), staff alert email(s) (comma list), link to template editor |
-| Balance collection | Default method: *Charge saved card* / *Email payment link* · Grace days before overdue (default 7) |
-| Reminders | On/off · days list (default 3, 7, 14) |
 | Policy | Default deposit policy text (used when a rule has none) |
 
 **Onboarding checklist** (dashboard top, dismissible, stored in settings):
@@ -1048,10 +1060,8 @@ model ShopSettings {
   brandColor         String?  @default("#1F3864")
   replyToEmail       String
   staffAlertEmails   String[]
-  defaultMethod      CollectionMethod @default(SAVED_CARD)
-  balanceGraceDays   Int      @default(7)
-  remindersEnabled   Boolean  @default(true)
-  reminderDays       Int[]    @default([3, 7, 14])
+  remindersEnabled   Boolean  @default(true)        // edited on P1
+  reminderDays       Int[]    @default([3, 7, 14])  // edited on P1
   defaultPolicyText  String?
   onboardingDone     Json     @default("{}")
   features           Json     @default("{}")   // { savedCardCharge: true, partialCharge: false }
@@ -1060,7 +1070,7 @@ model ShopSettings {
 ```
 
 ### 7.3 Backend
-- `settings.server.ts`: get-or-create defaults on install; zod validation (emails, days 1–60 ascending, ≤ 5 reminders).
+- `settings.server.ts`: get-or-create defaults on install; zod validation (emails). Reminder validation (days 1–60 ascending, ≤ 5) is shared with the P1 Reminders panel.
 - `plan.server.ts`: on install and on `shop/update` webhook → refresh `Shop.planName/isPlus`; compute `features` from plan + spike results table (constant in code).
 - On save: write `$app:deposit.policy` metafield (Module 3).
 
@@ -1074,13 +1084,13 @@ model ShopSettings {
 ### 7.5 Tests
 | Type | Case |
 |---|---|
-| Unit | Validation: invalid email, reminder days not ascending, > 5 reminders |
+| Unit | Validation: invalid email; reminder days not ascending, > 5 reminders (P1 panel) |
 | Integration | Install → default settings created with shop email |
 | Integration | Plan change Grow → Plus via `shop/update` → features updated |
 | Manual | Theme editor deep link adds the block |
 
 ### 7.6 Done criteria
-- [ ] Settings persist and affect emails, reminders, default method.
+- [ ] Settings persist and affect emails; P1 reminders panel and rule-level method/overdue days work.
 - [ ] Unavailable features are hidden/explained per plan.
 
 ---
@@ -1267,8 +1277,6 @@ model ShopSettings {
   brandColor String? @default("#1F3864")
   replyToEmail String
   staffAlertEmails String[]
-  defaultMethod CollectionMethod @default(SAVED_CARD)
-  balanceGraceDays Int @default(7)
   remindersEnabled Boolean @default(true)
   reminderDays Int[] @default([3, 7, 14])
   defaultPolicyText String?
@@ -1300,6 +1308,8 @@ model DepositRule {
   balanceTrigger StepTrigger
   balanceTriggerDays Int?
   finalDueDays Int @default(90)
+  collectionMethod CollectionMethod @default(SAVED_CARD)
+  overdueDays Int @default(7)
   buyerLabel String
   policyText String?
   active Boolean @default(true)
@@ -1344,6 +1354,8 @@ model DepositOrder {
   balanceDueAt DateTime?
   finalDueAt DateTime
   mandateGid String?
+  collectionMethod CollectionMethod
+  overdueDays Int
   paymentLinkUrl String?
   fulfilledAt DateTime?
   cancelledAt DateTime?
