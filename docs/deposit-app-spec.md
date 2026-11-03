@@ -1,4 +1,4 @@
-# Deposit & Balance App — Build Specification
+# Stagepay (Deposit & Balance App) — Build Specification
 
 Version 1.1 · 2026-11-03 · Source documents: *Deposit & Balance App – Requirements* (merchant brief), *Deposit_App_Estimate.xlsx*, *Build_Order_Estimate.xlsx*, *docs/feasibility-test-guide.md*
 
